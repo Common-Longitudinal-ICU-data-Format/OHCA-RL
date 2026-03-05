@@ -18,8 +18,6 @@ CLIF_*.parquet
 CLIF_*.csv
 CLIF_*.fst
 
-#ignore the identifier app
-CLIF_cohort_identifier*
 
 # ignore file used to initialize renv when creating the template
 initialize_renv.R
@@ -30,3 +28,15 @@ initialize_renv.R
 # ignore pdf reports and rendered html
 *.pdf
 *.html
+
+# AI 
+.claude
+
+# local directories
+references/
+output/
+
+# temp ignored
+code/01_create_wide_df.py
+code/utils.py
+config_mimic.json

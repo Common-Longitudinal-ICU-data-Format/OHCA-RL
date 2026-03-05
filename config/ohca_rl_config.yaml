@@ -1,0 +1,264 @@
+# OHCA-RL Variable Configuration
+# Defines all variables needed for the analysis dataset
+# Reference: references/CLIF-RL-OHCA.csv
+
+# ============================================================================
+# LABS
+# ============================================================================
+labs_of_interest:
+  # ABGs / oxygenation
+  - po2_arterial
+  - pco2_arterial
+  - ph_arterial
+  - bicarbonate
+  - so2_arterial
+  # Electrolytes
+  - sodium
+  - potassium
+  - chloride
+  - calcium_total
+  - magnesium
+  # Renal
+  - creatinine
+  - bun
+  # Metabolic
+  - glucose_serum
+  - lactate
+  # Hematology
+  - hemoglobin
+
+labs_required_columns:
+  - hospitalization_id
+  - lab_result_dttm
+  - lab_category
+  - lab_value_numeric
+
+labs_normal_values:
+  bicarbonate: 25.0
+  bun: 15.5
+  calcium_total: 9.2
+  chloride: 101.0
+  creatinine: 0.9
+  glucose_serum: 90.0
+  hemoglobin: 15.0
+  lactate: 1.25
+  magnesium: 1.7
+  pco2_arterial: 40.0
+  ph_arterial: 7.40
+  po2_arterial: 90.0
+  potassium: 4.25
+  so2_arterial: 95.0
+  sodium: 140.0
+
+# ============================================================================
+# VITALS
+# ============================================================================
+vitals_of_interest:
+  - heart_rate
+  - respiratory_rate
+  - sbp
+  - dbp
+  - map
+  - spo2
+  - temp_c
+  - weight_kg
+  - height_cm
+
+vitals_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - vital_category
+  - vital_value
+
+# ============================================================================
+# CONTINUOUS MEDICATIONS
+# ============================================================================
+meds_continuous_of_interest:
+  # Vasoactives (9)
+  - norepinephrine
+  - epinephrine
+  - phenylephrine
+  - vasopressin
+  - dopamine
+  - angiotensin
+  - dobutamine
+  - milrinone
+  - isoproterenol
+  # Sedatives (4)
+  - propofol
+  - midazolam
+  - lorazepam
+  - dexmedetomidine
+  # NMB agents (3)
+  - vecuronium
+  - rocuronium
+  - cisatracurium
+
+meds_continuous_required_columns:
+  - hospitalization_id
+  - admin_dttm
+  - med_category
+  - med_dose
+  - med_dose_unit
+
+# Category groupings for boolean indicators
+med_categories:
+  vasoactives:
+    - norepinephrine
+    - epinephrine
+    - phenylephrine
+    - vasopressin
+    - dopamine
+    - angiotensin
+    - dobutamine
+    - milrinone
+    - isoproterenol
+  sedatives:
+    - propofol
+    - midazolam
+    - lorazepam
+    - dexmedetomidine
+  nmb:
+    - vecuronium
+    - rocuronium
+    - cisatracurium
+
+# Preferred units for dose conversion
+med_preferred_units:
+  # Vasoactives (mcg/kg/min)
+  norepinephrine: mcg/kg/min
+  epinephrine: mcg/kg/min
+  phenylephrine: mcg/kg/min
+  dopamine: mcg/kg/min
+  dobutamine: mcg/kg/min
+  milrinone: mcg/kg/min
+  isoproterenol: mcg/kg/min
+  angiotensin: mcg/kg/min
+  vasopressin: units/min  # NOT weight-based
+  # Sedatives
+  propofol: mcg/kg/min
+  dexmedetomidine: mcg/kg/hr
+  midazolam: mcg/kg/min
+  lorazepam: mg/hr  # NOT weight-based
+  # NMB
+  cisatracurium: mcg/kg/min
+  vecuronium: mcg/kg/min
+  rocuronium: mcg/kg/min
+
+# NEE coefficients (from CLIF-RL-OHCA.csv)
+nee_coefficients:
+  norepinephrine: 1.0
+  epinephrine: 1.0
+  phenylephrine: 0.1      # 1/10
+  dopamine: 0.01           # 1/100
+  vasopressin: 2.5
+  angiotensin: 10.0
+
+# ============================================================================
+# INTERMITTENT MEDICATIONS (NEW for OHCA)
+# ============================================================================
+meds_intermittent_of_interest:
+  anticonvulsants:
+    - diazepam
+    - lorazepam
+    - valproate
+
+meds_intermittent_required_columns:
+  - hospitalization_id
+  - admin_dttm
+  - med_category
+  - med_dose
+  - med_dose_unit
+
+# ============================================================================
+# RESPIRATORY SUPPORT
+# ============================================================================
+respiratory_columns_numeric:
+  - fio2_set
+  - peep_set
+  - tidal_volume_set
+  - resp_rate_set
+
+respiratory_columns_categorical:
+  - device_category
+  - mode_category
+
+respiratory_columns_boolean:
+  - tracheostomy
+  - on_imv
+  - in_icu
+
+respiratory_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - device_category
+  - mode_category
+  - peep_set
+  - fio2_set
+  - resp_rate_set
+  - tidal_volume_set
+  - tracheostomy
+
+# ============================================================================
+# ADT
+# ============================================================================
+adt_required_columns:
+  - hospitalization_id
+  - in_dttm
+  - out_dttm
+  - location_category
+
+# ============================================================================
+# CPC REWARD MAPPING (from CLIF-RL-OHCA.csv)
+# ============================================================================
+cpc_mapping:
+  CPC5:
+    - expired
+    - hospice
+  CPC4:
+    - long term care hospital
+    - skilled nursing facility
+  CPC3:
+    - acute inpatient rehab facility
+    - acute care hospital
+  CPC1_2:
+    - home
+    - jail
+
+# ============================================================================
+# OUTLIER RANGES (subset relevant to OHCA variables)
+# ============================================================================
+outlier_ranges:
+  vitals:
+    heart_rate: {min: 0, max: 300}
+    respiratory_rate: {min: 0, max: 60}
+    sbp: {min: 0, max: 300}
+    dbp: {min: 0, max: 200}
+    map: {min: 0, max: 150}
+    spo2: {min: 50, max: 100}
+    temp_c: {min: 32, max: 44}
+    weight_kg: {min: 30, max: 1100}
+    height_cm: {min: 76, max: 255}
+
+  labs:
+    bicarbonate: {min: 0.0, max: 50.0}
+    bun: {min: 0.0, max: 250.0}
+    calcium_total: {min: 0.0, max: 20.0}
+    chloride: {min: 50.0, max: 140.0}
+    creatinine: {min: 0.0, max: 20.0}
+    glucose_serum: {min: 0.0, max: 2000.0}
+    hemoglobin: {min: 2.0, max: 25.0}
+    lactate: {min: 0.0, max: 30.0}
+    magnesium: {min: 0.0, max: 10.0}
+    pco2_arterial: {min: 5.0, max: 200.0}
+    ph_arterial: {min: 6.0, max: 10.0}
+    po2_arterial: {min: 0.0, max: 800.0}
+    potassium: {min: 0.0, max: 15.0}
+    so2_arterial: {min: 0.0, max: 100.0}
+    sodium: {min: 90.0, max: 210.0}
+
+  respiratory:
+    fio2_set: {min: 0.21, max: 1.0}
+    peep_set: {min: 0.0, max: 30.0}
+    tidal_volume_set: {min: 100, max: 3000}
+    resp_rate_set: {min: 0, max: 200}

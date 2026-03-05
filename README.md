@@ -72,11 +72,6 @@ pip install -r requirements.txt
 ## 3. Run code
 
 Detailed instructions on the code workflow are provided in the [code directory](code/README.md)
-
-## Example Repositories
-* [CLIF Adult Sepsis Events](https://github.com/08wparker/CLIF_sepsis) for R
-* [CLIF Eligibility for mobilization](https://github.com/kaveriC/CLIF-eligibility-for-mobilization) for Python
-* [CLIF Variation in Ventilation](https://github.com/ingra107/clif_vent_variation)
 ---
 
 
