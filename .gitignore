@@ -37,6 +37,4 @@ references/
 output/
 
 # temp ignored
-code/01_create_wide_df.py
-code/utils.py
 config_mimic.json

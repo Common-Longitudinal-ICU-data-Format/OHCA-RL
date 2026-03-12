@@ -159,10 +159,10 @@ nee_coefficients:
 # INTERMITTENT MEDICATIONS 
 # ============================================================================
 meds_intermittent_of_interest:
-  anticonvulsants:
-    - diazepam
-    - lorazepam
-    - valproate
+  # anticonvulsants:
+  - diazepam
+  - lorazepam
+  - valproate
 
 meds_intermittent_required_columns:
   - hospitalization_id
@@ -181,10 +181,11 @@ meds_intermittent_categories:
     - valproate
 
 # Preferred units for dose conversion (intermittent)
+# These are bolus meds — keep in mg (no rate conversion)
 meds_intermittent_preferred_units:
-  diazepam: mcg/kg/min
-  lorazepam: mcg/kg/min
-  valproate: mcg/kg/min
+  diazepam: mg
+  lorazepam: mg
+  valproate: mg
 
 # ============================================================================
 # RESPIRATORY SUPPORT
