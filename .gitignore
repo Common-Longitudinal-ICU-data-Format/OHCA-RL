@@ -24,6 +24,7 @@ initialize_renv.R
 
 # ignore filtered CLIF tables stored as Rdata
 *.RData
+__pychache__/
 
 # ignore pdf reports and rendered html
 *.pdf

@@ -130,7 +130,6 @@ def _():
     """)
     return (
         bucket_hours,
-        cohort_df,
         compute_missingness,
         death_time_df,
         final_dir,
@@ -774,12 +773,12 @@ def _(bucketed_df, logger, mo, np, ohca_config):
 
 # ── Cell 7: Derived Booleans & Reward Variables ──────────────────────────
 @app.cell
-def _(actioned_df, bucket_hours, cohort_df, death_time_df, logger, mo, np, ohca_config, pd):
+def _(actioned_df, bucket_hours, death_time_df, logger, mo, np, ohca_config, patient_static, pd):
     logger.info("Step 7: Adding derived booleans and reward variables...")
     enriched_df = actioned_df.copy()
 
-    # --- Merge discharge_category from cohort ---
-    _discharge = cohort_df[["hospitalization_id", "discharge_category"]].drop_duplicates(
+    # --- Merge discharge_category from patient_static ---
+    _discharge = patient_static[["hospitalization_id", "discharge_category"]].drop_duplicates(
         subset=["hospitalization_id"]
     )
     enriched_df = enriched_df.merge(_discharge, on="hospitalization_id", how="left")
