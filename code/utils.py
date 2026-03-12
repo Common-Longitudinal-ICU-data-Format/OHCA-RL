@@ -16,6 +16,190 @@ from typing import Tuple, Set
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# RESPIRATORY SUPPORT: DEVICE CATEGORIZATION & FiO2 IMPUTATION
+# =============================================================================
+
+# Standard clinical nasal cannula LPM → FiO2 lookup
+# Each L/min adds ~4% above room air (21%)
+NC_LPM_TO_FIO2 = {
+    1: 0.24, 2: 0.28, 3: 0.32, 4: 0.36, 5: 0.40,
+    6: 0.44, 7: 0.48, 8: 0.52, 9: 0.56, 10: 0.60,
+}
+
+
+def categorize_device_from_tracheostomy(df: pd.DataFrame) -> pd.DataFrame:
+    """Infer device_category for rows with tracheostomy or LPM but no device.
+
+    Applied BEFORE waterfall to give it better device info.
+
+    Logic (from clinical heuristics):
+    - Has tracheostomy (ever) → 'trach collar'
+    - No tracheostomy AND lpm_set < 30 → 'face mask'
+    - No tracheostomy AND lpm_set >= 30 → 'high flow nc'
+
+    Only fills rows where device_category is missing and lpm_set is present.
+    """
+    df = df.copy()
+
+    # Build per-patient tracheostomy flag (ever had trach = 1)
+    if "tracheostomy" in df.columns:
+        _trach_ever = (
+            df.groupby("hospitalization_id")["tracheostomy"]
+            .transform("max")
+            .fillna(0)
+        )
+    else:
+        _trach_ever = pd.Series(0, index=df.index)
+
+    _missing_device = df["device_category"].isna()
+    _has_lpm = df["lpm_set"].notna()
+    _needs_fill = _missing_device & _has_lpm
+
+    # Tracheostomy → trach collar
+    _trach_mask = _needs_fill & (_trach_ever == 1)
+    df.loc[_trach_mask, "device_category"] = "trach collar"
+
+    # No trach, lpm < 30 → face mask
+    _fm_mask = _needs_fill & (_trach_ever != 1) & (df["lpm_set"] < 30)
+    df.loc[_fm_mask, "device_category"] = "face mask"
+
+    # No trach, lpm >= 30 → high flow nc
+    _hfnc_mask = _needs_fill & (_trach_ever != 1) & (df["lpm_set"] >= 30)
+    df.loc[_hfnc_mask, "device_category"] = "high flow nc"
+
+    _n_filled = _trach_mask.sum() + _fm_mask.sum() + _hfnc_mask.sum()
+    if _n_filled > 0:
+        logger.info(
+            "categorize_device_from_tracheostomy: filled %d rows "
+            "(trach collar: %d, face mask: %d, HFNC: %d)",
+            _n_filled, _trach_mask.sum(), _fm_mask.sum(), _hfnc_mask.sum(),
+        )
+
+    return df
+
+
+def categorize_device(df: pd.DataFrame) -> pd.DataFrame:
+    """Infer device_category from mode, fio2, lpm, peep, tidal_volume.
+
+    Applied BEFORE waterfall. Fills missing device_category using heuristics:
+    - Known vent modes → 'vent'
+    - FiO2=0.21, no LPM/PEEP/TV → 'room air'
+    - LPM=0, no FiO2/PEEP/TV → 'room air'
+    - 0 < LPM <= 20, no FiO2/PEEP/TV → 'nasal cannula'
+    - LPM > 20, no FiO2/PEEP/TV → 'high flow nc'
+    - device='nasal cannula' but LPM > 20 → 'high flow nc'
+    """
+    df = df.copy()
+
+    _vent_modes = {
+        "simv", "pressure-regulated volume control",
+        "assist control-volume control",
+    }
+
+    _dc = df["device_category"]
+    _mc = df.get("mode_category", pd.Series(dtype=object))
+    _fio2 = df.get("fio2_set", pd.Series(dtype=float))
+    _lpm = df.get("lpm_set", pd.Series(dtype=float))
+    _peep = df.get("peep_set", pd.Series(dtype=float))
+    _tv = df.get("tidal_volume_set", pd.Series(dtype=float))
+
+    _missing = _dc.isna()
+
+    # Known vent mode → vent
+    _vent_mask = _missing & _mc.str.lower().isin(_vent_modes)
+    df.loc[_vent_mask, "device_category"] = "vent"
+
+    # Room air: fio2=0.21, no lpm/peep/tv
+    _ra_mask1 = (
+        _missing & ~_vent_mask
+        & (_fio2 == 0.21)
+        & _lpm.isna() & _peep.isna() & _tv.isna()
+    )
+    df.loc[_ra_mask1, "device_category"] = "room air"
+
+    # Room air: lpm=0, no fio2/peep/tv
+    _ra_mask2 = (
+        _missing & ~_vent_mask & ~_ra_mask1
+        & _fio2.isna()
+        & (_lpm == 0)
+        & _peep.isna() & _tv.isna()
+    )
+    df.loc[_ra_mask2, "device_category"] = "room air"
+
+    # Nasal cannula: 0 < lpm <= 20, no fio2/peep/tv
+    _nc_mask = (
+        _missing & ~_vent_mask & ~_ra_mask1 & ~_ra_mask2
+        & _fio2.isna()
+        & (_lpm > 0) & (_lpm <= 20)
+        & _peep.isna() & _tv.isna()
+    )
+    df.loc[_nc_mask, "device_category"] = "nasal cannula"
+
+    # HFNC: lpm > 20, no fio2/peep/tv
+    _hfnc_mask = (
+        _missing & ~_vent_mask & ~_ra_mask1 & ~_ra_mask2 & ~_nc_mask
+        & _fio2.isna()
+        & (_lpm > 20)
+        & _peep.isna() & _tv.isna()
+    )
+    df.loc[_hfnc_mask, "device_category"] = "high flow nc"
+
+    # Reclassify: labeled nasal cannula but lpm > 20 → HFNC
+    _reclass = (df["device_category"] == "nasal cannula") & (_lpm > 20)
+    df.loc[_reclass, "device_category"] = "high flow nc"
+
+    _n_filled = sum(m.sum() for m in [
+        _vent_mask, _ra_mask1, _ra_mask2, _nc_mask, _hfnc_mask, _reclass,
+    ])
+    if _n_filled > 0:
+        logger.info("categorize_device: filled/reclassified %d rows", _n_filled)
+
+    return df
+
+
+def impute_fio2(df: pd.DataFrame) -> pd.DataFrame:
+    """Impute missing FiO2 values after waterfall.
+
+    Applied AFTER waterfall. Uses:
+    1. Room air → FiO2 = 0.21
+    2. Nasal cannula + LPM → clinical lookup (0.24 + 0.04 * LPM)
+    """
+    df = df.copy()
+
+    _fio2_missing = df["fio2_set"].isna()
+
+    # Room air → 0.21
+    _ra_mask = _fio2_missing & (df["device_category"] == "room air")
+    df.loc[_ra_mask, "fio2_set"] = 0.21
+
+    # Nasal cannula + LPM → lookup
+    _nc_mask = (
+        _fio2_missing & ~_ra_mask
+        & (df["device_category"] == "nasal cannula")
+        & df["lpm_set"].notna()
+    )
+    if _nc_mask.any():
+        # Use formula: 0.24 + 0.04 * LPM (continuous, not just integer lookup)
+        df.loc[_nc_mask, "fio2_set"] = (
+            0.24 + 0.04 * df.loc[_nc_mask, "lpm_set"]
+        ).clip(upper=1.0)
+
+    _n_ra = _ra_mask.sum()
+    _n_nc = _nc_mask.sum()
+    if _n_ra + _n_nc > 0:
+        logger.info(
+            "impute_fio2: filled %d rows (room air: %d, nasal cannula+LPM: %d)",
+            _n_ra + _n_nc, _n_ra, _n_nc,
+        )
+
+    return df
+
+
+# =============================================================================
+# DERIVED FEATURE CALCULATIONS
+# =============================================================================
+
 def calculate_pf_ratio(po2: pd.Series, fio2: pd.Series) -> pd.Series:
     """PaO2/FiO2 ratio. Handles percentage vs fraction FiO2."""
     fio2 = fio2.copy()

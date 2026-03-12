@@ -309,6 +309,7 @@ action_inference:
   nee_change_tolerance: 0.03   # mcg/kg/min — minimum meaningful NEE delta
   include_start_action: false  # start merged into increase → 4 actions
   time_window_hours: 120       # first vital to +120h
+  med_ffill_trailing_hours: 4  # ffill non-zero meds up to 4h after last observation
 
 # Action encoding:
 #   0 = stay     (no meaningful NEE change)

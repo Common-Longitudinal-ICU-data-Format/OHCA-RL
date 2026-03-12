@@ -608,5 +608,83 @@ def _(cohort_ohca_icu, mo, output_dir):
     return
 
 
+@app.cell
+def _(cohort_ohca_icu, con, mo, output_dir, pd, tables_path):
+    # ── Save Static Patient-Level DataFrame ───────────────────────────
+    # One row per hospitalization with demographics, discharge info, and death timing.
+    # Downstream scripts (03+) can load this instead of re-reading CLIF tables.
+
+    # Load clif_patient for demographics + death_dttm
+    _pat_df = pd.read_parquet(f"{tables_path}/clif_patient.parquet")
+
+    # Get discharge_dttm and age from hospitalization table (already loaded as hosp_tbl in DuckDB)
+    _hosp_extra = con.execute("""
+        SELECT hospitalization_id, patient_id, discharge_dttm, age_at_admission
+        FROM hosp_tbl
+    """).fetchdf()
+
+    # Build static df
+    _cohort_ids = cohort_ohca_icu[["patient_id", "hospitalization_id", "admission_dttm",
+                                    "discharge_category", "survival_status", "arrest_type"]].drop_duplicates(
+        subset=["hospitalization_id"]
+    )
+
+    _static = (
+        _cohort_ids
+        .merge(
+            _hosp_extra[["hospitalization_id", "discharge_dttm", "age_at_admission"]],
+            on="hospitalization_id", how="left",
+        )
+        .merge(
+            _pat_df[["patient_id", "sex_category", "race_category", "ethnicity_category", "death_dttm"]],
+            on="patient_id", how="left",
+        )
+    )
+
+    # Prefer death_dttm from clif_patient, fallback to discharge_dttm for expired patients
+    _expired_mask = _static["discharge_category"].str.lower().str.contains("expired|hospice", na=False)
+    _static.loc[_expired_mask & _static["death_dttm"].isna(), "death_dttm"] = (
+        _static.loc[_expired_mask & _static["death_dttm"].isna(), "discharge_dttm"]
+    )
+    # Clear death_dttm for non-expired patients (may have died in a later hospitalization)
+    _static.loc[~_expired_mask, "death_dttm"] = pd.NaT
+
+    # Standardize category columns to lowercase
+    for _col in ["sex_category", "race_category", "ethnicity_category", "discharge_category"]:
+        if _col in _static.columns:
+            _static[_col] = _static[_col].str.lower().str.strip()
+
+    _output_path = output_dir / "patient_static.parquet"
+    _static.to_parquet(_output_path, index=False)
+    _file_size = _output_path.stat().st_size / 1024
+
+    # Summary
+    _n = len(_static)
+    _n_with_death = _static["death_dttm"].notna().sum()
+
+    mo.md(f"""
+    ## Checkpoint: Static Patient-Level DataFrame
+
+    | Metric | Value |
+    |--------|-------|
+    | **Patients** | {_n:,} |
+    | **Columns** | {len(_static.columns)} |
+    | **With death_dttm** | {_n_with_death:,} ({_n_with_death / _n * 100:.1f}%) |
+    | **Saved to** | `{_output_path}` |
+    | **Size** | {_file_size:.1f} KB |
+
+    **Columns**: {', '.join(_static.columns.tolist())}
+
+    **Demographics**:
+
+    | | Values |
+    |-|--------|
+    | **Age** | median {_static['age_at_admission'].median():.0f}, IQR {_static['age_at_admission'].quantile(0.25):.0f}–{_static['age_at_admission'].quantile(0.75):.0f} |
+    | **Sex** | {_static['sex_category'].value_counts().to_dict()} |
+    | **Race** | {_static['race_category'].value_counts().head(5).to_dict()} |
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()

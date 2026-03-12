@@ -35,6 +35,7 @@ initialize_renv.R
 # local directories
 references/
 output/
+code/archive
 
 # temp ignored
 config_mimic.json

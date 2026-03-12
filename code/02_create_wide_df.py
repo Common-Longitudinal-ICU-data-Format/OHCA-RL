@@ -42,7 +42,10 @@ def _():
     )
     from clifpy.utils.outlier_handler import apply_outlier_handling
 
-    from utils import build_weight_table, convert_med_doses, compute_nee
+    from utils import (
+        build_weight_table, convert_med_doses, compute_nee,
+        categorize_device_from_tracheostomy, categorize_device, impute_fio2,
+    )
 
     # Configure logging for dose conversion
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
@@ -95,10 +98,13 @@ def _():
         Vitals,
         apply_outlier_handling,
         build_weight_table,
+        categorize_device,
+        categorize_device_from_tracheostomy,
         cohort_path,
         compute_nee,
         convert_med_doses,
         file_type,
+        impute_fio2,
         intermediate_dir,
         mo,
         ohca_config,
@@ -492,8 +498,11 @@ def _(
 def _(
     RespiratorySupport,
     apply_outlier_handling,
+    categorize_device,
+    categorize_device_from_tracheostomy,
     cohort_hosp_ids,
     file_type,
+    impute_fio2,
     mo,
     tables_path,
     timezone,
@@ -509,8 +518,17 @@ def _(
     # Apply clifpy outlier handling BEFORE waterfall
     apply_outlier_handling(resp_tbl)
 
+    # --- PRE-WATERFALL: device categorization ---
+    # Infer device_category from tracheostomy + LPM (image logic)
+    resp_tbl.df = categorize_device_from_tracheostomy(resp_tbl.df)
+    # Infer device_category from mode, fio2, lpm, peep, tidal_volume
+    resp_tbl.df = categorize_device(resp_tbl.df)
+
     # Apply waterfall — fills missing FiO2, infers IMV/NIPPV, forward-fills params
     resp_tbl = resp_tbl.waterfall()
+
+    # --- POST-WATERFALL: FiO2 imputation for remaining gaps ---
+    resp_tbl.df = impute_fio2(resp_tbl.df)
 
     # Extract processed DataFrame
     resp_df = resp_tbl.df.copy()
@@ -578,7 +596,7 @@ def _(CrrtTherapy, cohort_hosp_ids, file_type, mo, pd, tables_path, timezone):
         # Keep only columns of interest
         _crrt_keep = [
             "hospitalization_id", "event_dttm",
-            "crrt_crrt_mode_name", "crrt_crrt_mode_category",
+            "on_crrt", "crrt_crrt_mode_name", "crrt_crrt_mode_category",
         ]
         crrt_wide = crrt_wide[[c for c in _crrt_keep if c in crrt_wide.columns]]
 
@@ -685,12 +703,6 @@ def _(
     wide_df = wide_df.sort_values(["hospitalization_id", "event_dttm"]).reset_index(
         drop=True
     )
-
-    # Forward-fill ADT location within each hospitalization
-    if "adt_location_category" in wide_df.columns:
-        wide_df["adt_location_category"] = wide_df.groupby("hospitalization_id")[
-            "adt_location_category"
-        ].ffill()
 
     # Summary
     _n_rows = len(wide_df)
