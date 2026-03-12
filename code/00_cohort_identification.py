@@ -8,6 +8,7 @@
 #     "matplotlib",
 #     "tabulate",
 #     "pytz",
+#     "clifpy==0.3.8",
 # ]
 # ///
 
@@ -28,23 +29,38 @@ def _():
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyBboxPatch
     from pathlib import Path
-    return FancyBboxPatch, Path, duckdb, json, mo, pd, plt
+
+    import clifpy
+    from clifpy import Hospitalization, HospitalDiagnosis, Adt
+    return (
+        Adt,
+        FancyBboxPatch,
+        HospitalDiagnosis,
+        Hospitalization,
+        Path,
+        clifpy,
+        duckdb,
+        json,
+        mo,
+        pd,
+        plt,
+    )
 
 
 @app.cell
-def _(Path, json, mo):
+def _(Path, clifpy, json, mo):
     # Load configuration
     project_root = Path(__file__).resolve().parent.parent
     config_path = project_root / "config" / "config.json"
     with open(config_path, "r") as f:
         config = json.load(f)
 
-    tables_path = Path(config["tables_path"])
+    tables_path = config["tables_path"]
     file_type = config["file_type"]
     site_name = config["site_name"]
     timezone = config["timezone"]
 
-    data_exists = tables_path.exists()
+    data_exists = Path(tables_path).exists()
 
     mo.md(f"""
     ## Setup & Configuration
@@ -56,12 +72,13 @@ def _(Path, json, mo):
     | **File type** | `{file_type}` |
     | **Timezone** | `{timezone}` |
     | **Data directory exists** | {'Yes' if data_exists else '**NO — check config**'} |
+    | **clifpy version** | `{clifpy.__version__}` |
     """)
-    return file_type, project_root, site_name, tables_path
+    return file_type, project_root, site_name, tables_path, timezone
 
 
 @app.cell
-def _(file_type, tables_path):
+def _():
     # ── Constants ──────────────────────────────────────────────────────
     # ICD codes for cardiac arrest (lowercase, periods removed)
     ICD_PREFIXES = ["i460", "i461", "i462", "i468", "i469", "i4900", "i4901"]
@@ -75,17 +92,6 @@ def _(file_type, tables_path):
         "i4901": "Ventricular flutter",
     }
 
-    # ── Helpers ────────────────────────────────────────────────────────
-    def read_table(table_name):
-        """Build DuckDB expression to read a CLIF table."""
-        path = tables_path / f"{table_name}.{file_type}"
-        if file_type == "parquet":
-            return f"read_parquet('{path}')"
-        elif file_type == "csv":
-            return f"read_csv_auto('{path}')"
-        else:
-            raise ValueError(f"Unknown file type: {file_type}")
-
     def build_icd_filter(column="dx_clean"):
         """Build SQL WHERE clause for ICD prefix matching on cleaned codes."""
         conditions = " OR ".join(f"{column} LIKE '{code}%'" for code in ICD_PREFIXES)
@@ -93,56 +99,55 @@ def _(file_type, tables_path):
 
     # ── STROBE counts tracker ──────────────────────────────────────────
     strobe_counts = {}
-    return ICD_DESCRIPTIONS, build_icd_filter, read_table, strobe_counts
-
-
-@app.cell
-def _(duckdb, mo, read_table):
-    # ── Load & Preview CLIF Tables ─────────────────────────────────────
-    con = duckdb.connect()
-
-    hosp_table = read_table("clif_hospitalization")
-    dx_table = read_table("clif_hospital_diagnosis")
-    adt_table = read_table("clif_adt")
-
-    # Get row counts
-    n_hosp = con.execute(f"SELECT COUNT(*) FROM {hosp_table}").fetchone()[0]
-    n_dx = con.execute(f"SELECT COUNT(*) FROM {dx_table}").fetchone()[0]
-    n_adt = con.execute(f"SELECT COUNT(*) FROM {adt_table}").fetchone()[0]
-
-    # Get column names
-    cols_hosp = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {hosp_table} LIMIT 0").fetchall()]
-    cols_dx = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {dx_table} LIMIT 0").fetchall()]
-    cols_adt = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {adt_table} LIMIT 0").fetchall()]
-
-    mo.md(f"""
-    ## Checkpoint: CLIF Tables Loaded
-
-    | Table | Rows | Columns |
-    |-------|------|---------|
-    | `clif_hospitalization` | {n_hosp:,} | {', '.join(cols_hosp)} |
-    | `clif_hospital_diagnosis` | {n_dx:,} | {', '.join(cols_dx)} |
-    | `clif_adt` | {n_adt:,} | {', '.join(cols_adt)} |
-    """)
-    return adt_table, con, dx_table, hosp_table
+    return ICD_DESCRIPTIONS, build_icd_filter, strobe_counts
 
 
 @app.cell
 def _(
-    ICD_DESCRIPTIONS,
-    build_icd_filter,
-    con,
-    dx_table,
-    hosp_table,
+    Adt,
+    HospitalDiagnosis,
+    Hospitalization,
+    duckdb,
+    file_type,
     mo,
-    strobe_counts,
+    tables_path,
+    timezone,
 ):
+    # ── Load CLIF Tables via clifpy ────────────────────────────────────
+    hosp_obj = Hospitalization.from_file(data_directory=tables_path, filetype=file_type, timezone=timezone)
+    dx_obj = HospitalDiagnosis.from_file(data_directory=tables_path, filetype=file_type, timezone=timezone)
+    adt_obj = Adt.from_file(data_directory=tables_path, filetype=file_type, timezone=timezone)
+
+    hosp_df = hosp_obj.df
+    dx_df = dx_obj.df
+    adt_df = adt_obj.df
+
+    # Register in DuckDB for SQL queries
+    con = duckdb.connect()
+    con.register("hosp_tbl", hosp_df)
+    con.register("dx_tbl", dx_df)
+    con.register("adt_tbl", adt_df)
+
+    n_hosp = len(hosp_df)
+    n_dx = len(dx_df)
+    n_adt = len(adt_df)
+
+    mo.md(f"""
+    ## Checkpoint: CLIF Tables Loaded (via clifpy)
+
+    | Table | Rows | Columns |
+    |-------|------|---------|
+    | `clif_hospitalization` | {n_hosp:,} | {', '.join(hosp_df.columns.tolist())} |
+    | `clif_hospital_diagnosis` | {n_dx:,} | {', '.join(dx_df.columns.tolist())} |
+    | `clif_adt` | {n_adt:,} | {', '.join(adt_df.columns.tolist())} |
+    """)
+    return (con,)
+
+
+@app.cell
+def _(ICD_DESCRIPTIONS, build_icd_filter, con, mo, strobe_counts):
     # ── Step 1: All Cardiac Arrest Encounters ──────────────────────────
     icd_filter = build_icd_filter("dx_clean")
-
-    # Determine the POA column name (could be present_on_admission or poa_present)
-    dx_cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {dx_table} LIMIT 0").fetchall()]
-    poa_col = "present_on_admission" if "present_on_admission" in dx_cols else "poa_present"
 
     cohort_v2 = con.execute(f"""
         WITH dx_cleaned AS (
@@ -150,29 +155,27 @@ def _(
                 d.hospitalization_id,
                 d.diagnosis_code,
                 LOWER(REPLACE(d.diagnosis_code, '.', '')) AS dx_clean,
-                CAST(d.{poa_col} AS VARCHAR) AS poa_raw
-            FROM {dx_table} d
+                COALESCE(CAST(d.poa_present AS INT), 0) AS poa_present
+            FROM dx_tbl d
         )
         SELECT DISTINCT
             h.patient_id,
             dc.hospitalization_id,
             dc.diagnosis_code,
             dc.dx_clean,
-            dc.poa_raw,
-            -- Standardize POA to int: yes/y/true/1 → 1, everything else → 0
-            CASE WHEN LOWER(dc.poa_raw) IN ('yes', 'y', 'true', '1', '1.0') THEN 1 ELSE 0 END AS poa_present,
+            dc.poa_present,
             -- Arrest type based on POA
             CASE
-                WHEN LOWER(dc.poa_raw) IN ('yes', 'y', 'true', '1', '1.0') THEN 'ohca'
-                WHEN LOWER(dc.poa_raw) IN ('no', 'n', 'false', '0', '0.0') THEN 'ihca'
+                WHEN dc.poa_present = 1 THEN 'ohca'
+                WHEN dc.poa_present = 0 THEN 'ihca'
                 ELSE 'unknown'
             END AS arrest_type,
             -- Survival status based on lowercase discharge_category
             LOWER(hc.discharge_category) AS discharge_category,
             CASE WHEN LOWER(hc.discharge_category) = 'expired' THEN 'non-survivor' ELSE 'survivor' END AS survival_status
         FROM dx_cleaned dc
-        INNER JOIN {hosp_table} hc ON dc.hospitalization_id = hc.hospitalization_id
-        INNER JOIN (SELECT DISTINCT patient_id, hospitalization_id FROM {hosp_table}) h
+        INNER JOIN hosp_tbl hc ON dc.hospitalization_id = hc.hospitalization_id
+        INNER JOIN (SELECT DISTINCT patient_id, hospitalization_id FROM hosp_tbl) h
             ON dc.hospitalization_id = h.hospitalization_id
         WHERE {icd_filter}
     """).fetchdf()
@@ -272,7 +275,7 @@ def _(cohort_v2, mo, site_name, strobe_counts):
 
 
 @app.cell
-def _(con, hosp_table, mo, ohca_all, strobe_counts):
+def _(con, mo, ohca_all, strobe_counts):
     # ── Step 3: First Encounter per Patient ────────────────────────────
     con.register("ohca_all_df", ohca_all)
 
@@ -281,7 +284,7 @@ def _(con, hosp_table, mo, ohca_all, strobe_counts):
             SELECT c.*, h.admission_dttm,
                 ROW_NUMBER() OVER (PARTITION BY c.patient_id ORDER BY h.admission_dttm ASC) AS rn
             FROM ohca_all_df c
-            INNER JOIN {hosp_table} h ON CAST(c.hospitalization_id AS VARCHAR) = CAST(h.hospitalization_id AS VARCHAR)
+            INNER JOIN hosp_tbl h ON CAST(c.hospitalization_id AS VARCHAR) = CAST(h.hospitalization_id AS VARCHAR)
             WHERE c.arrest_type = 'ohca'
         )
         SELECT * FROM ranked WHERE rn = 1
@@ -308,7 +311,7 @@ def _(con, hosp_table, mo, ohca_all, strobe_counts):
 
 
 @app.cell
-def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
+def _(cohort_ohca_first, con, mo, pd, strobe_counts):
     # ── Step 4: ICU Admitted ───────────────────────────────────────────
     con.register("ohca_first_df", cohort_ohca_first)
 
@@ -320,7 +323,7 @@ def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
                 MAX(CASE WHEN LOWER(a.location_category)='icu' THEN 1 ELSE 0 END) AS has_icu,
                 MAX(CASE WHEN LOWER(a.location_category)='ward' THEN 1 ELSE 0 END) AS has_ward,
                 MAX(CASE WHEN LOWER(a.location_category)='stepdown' THEN 1 ELSE 0 END) AS has_stepdown
-            FROM {adt_table} a
+            FROM adt_tbl a
             WHERE CAST(a.hospitalization_id AS VARCHAR) IN (SELECT CAST(hospitalization_id AS VARCHAR) FROM ohca_first_df)
             GROUP BY a.hospitalization_id
         )
@@ -341,7 +344,7 @@ def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
                 MAX(CASE WHEN LOWER(a.location_category)='ward' THEN 1 ELSE 0 END) AS has_ward,
                 MAX(CASE WHEN LOWER(a.location_category)='ed' THEN 1 ELSE 0 END) AS has_ed,
                 MAX(CASE WHEN LOWER(a.location_category)='stepdown' THEN 1 ELSE 0 END) AS has_stepdown
-            FROM {adt_table} a
+            FROM adt_tbl a
             WHERE CAST(a.hospitalization_id AS VARCHAR) IN (SELECT CAST(hospitalization_id AS VARCHAR) FROM ohca_first_df)
             GROUP BY a.hospitalization_id
         ),
@@ -370,7 +373,7 @@ def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
 
     # Filter to ICU-admitted
     icu_ids = con.execute(f"""
-        SELECT DISTINCT hospitalization_id FROM {adt_table}
+        SELECT DISTINCT hospitalization_id FROM adt_tbl
         WHERE LOWER(location_category)='icu'
             AND CAST(hospitalization_id AS VARCHAR) IN (SELECT CAST(hospitalization_id AS VARCHAR) FROM ohca_first_df)
     """).fetchdf()
@@ -397,7 +400,7 @@ def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
     # ICU type breakdown
     icu_types = con.execute(f"""
         SELECT LOWER(a.location_type) AS location_type, COUNT(DISTINCT a.hospitalization_id) AS encounters
-        FROM {adt_table} a
+        FROM adt_tbl a
         WHERE CAST(a.hospitalization_id AS VARCHAR) IN (SELECT CAST(hospitalization_id AS VARCHAR) FROM ohca_first_df)
             AND LOWER(a.location_category)='icu'
         GROUP BY LOWER(a.location_type) ORDER BY encounters DESC
@@ -406,7 +409,7 @@ def _(adt_table, cohort_ohca_first, con, hosp_table, mo, pd, strobe_counts):
     # Date range
     dates = con.execute(f"""
         SELECT MIN(h.admission_dttm) AS first_date, MAX(h.admission_dttm) AS last_date
-        FROM ohca_first_df c INNER JOIN {hosp_table} h ON CAST(c.hospitalization_id AS VARCHAR)=CAST(h.hospitalization_id AS VARCHAR)
+        FROM ohca_first_df c INNER JOIN hosp_tbl h ON CAST(c.hospitalization_id AS VARCHAR)=CAST(h.hospitalization_id AS VARCHAR)
         WHERE CAST(c.hospitalization_id AS VARCHAR) IN (SELECT CAST(hospitalization_id AS VARCHAR) FROM icu_ids)
     """).fetchone()
     con.register("icu_ids", icu_ids)

@@ -30,6 +30,7 @@ labs_of_interest:
 labs_required_columns:
   - hospitalization_id
   - lab_result_dttm
+  - lab_collect_dttm
   - lab_category
   - lab_value_numeric
 
@@ -102,7 +103,7 @@ meds_continuous_required_columns:
   - med_dose_unit
 
 # Category groupings for boolean indicators
-med_categories:
+meds_continuous_categories:
   vasoactives:
     - norepinephrine
     - epinephrine
@@ -123,8 +124,8 @@ med_categories:
     - rocuronium
     - cisatracurium
 
-# Preferred units for dose conversion
-med_preferred_units:
+# Preferred units for dose conversion (continuous meds)
+meds_continuous_preferred_units:
   # Vasoactives (mcg/kg/min)
   norepinephrine: mcg/kg/min
   epinephrine: mcg/kg/min
@@ -134,12 +135,12 @@ med_preferred_units:
   milrinone: mcg/kg/min
   isoproterenol: mcg/kg/min
   angiotensin: mcg/kg/min
-  vasopressin: units/min  # NOT weight-based
+  vasopressin: units/min 
   # Sedatives
   propofol: mcg/kg/min
   dexmedetomidine: mcg/kg/hr
   midazolam: mcg/kg/min
-  lorazepam: mg/hr  # NOT weight-based
+  lorazepam: mg/hr 
   # NMB
   cisatracurium: mcg/kg/min
   vecuronium: mcg/kg/min
@@ -155,7 +156,7 @@ nee_coefficients:
   angiotensin: 10.0
 
 # ============================================================================
-# INTERMITTENT MEDICATIONS (NEW for OHCA)
+# INTERMITTENT MEDICATIONS 
 # ============================================================================
 meds_intermittent_of_interest:
   anticonvulsants:
@@ -170,34 +171,60 @@ meds_intermittent_required_columns:
   - med_dose
   - med_dose_unit
 
+
+# Category groupings for boolean indicators (intermittent)
+meds_intermittent_categories:
+  anxiolytic:
+    - diazepam
+    - lorazepam
+  other:
+    - valproate
+
+# Preferred units for dose conversion (intermittent)
+meds_intermittent_preferred_units:
+  diazepam: mcg/kg/min
+  lorazepam: mcg/kg/min
+  valproate: mcg/kg/min
+
 # ============================================================================
 # RESPIRATORY SUPPORT
 # ============================================================================
 respiratory_columns_numeric:
   - fio2_set
+  - lpm_set
   - peep_set
   - tidal_volume_set
   - resp_rate_set
+  - resp_rate_obs
+  - pressure_support_set
+  - peak_inspiratory_pressure_set
 
 respiratory_columns_categorical:
+  - device_name
   - device_category
+  - mode_name
   - mode_category
 
 respiratory_columns_boolean:
   - tracheostomy
-  - on_imv
-  - in_icu
 
 respiratory_required_columns:
   - hospitalization_id
   - recorded_dttm
+  - device_name
   - device_category
+  - mode_name
   - mode_category
   - peep_set
   - fio2_set
+  - lpm_set
   - resp_rate_set
   - tidal_volume_set
+  - resp_rate_obs
+  - pressure_support_set
+  - peak_inspiratory_pressure_set
   - tracheostomy
+
 
 # ============================================================================
 # ADT
@@ -212,18 +239,28 @@ adt_required_columns:
 # CPC REWARD MAPPING (from CLIF-RL-OHCA.csv)
 # ============================================================================
 cpc_mapping:
-  CPC5:
-    - expired
-    - hospice
-  CPC4:
-    - long term care hospital
-    - skilled nursing facility
-  CPC3:
-    - acute inpatient rehab facility
-    - acute care hospital
-  CPC1_2:
+  CPC1_2:  # Good neurological outcome
     - home
     - jail
+    - against medical advice
+    - shelter
+  CPC3:    # Severe disability, dependent
+    - acute inpatient rehab facility
+    - acute care hospital
+    - group home
+    - assisted living
+    - psychiatric hospital
+    - chemical dependency
+  CPC4:    # Vegetative/minimal awareness
+    - skilled nursing facility
+    - long term care hospital
+  CPC5:    # Death
+    - expired
+    - hospice
+  exclude:  # Not classifiable
+    - still admitted
+    - missing
+    - other
 
 # ============================================================================
 # OUTLIER RANGES (subset relevant to OHCA variables)
@@ -262,3 +299,31 @@ outlier_ranges:
     peep_set: {min: 0.0, max: 30.0}
     tidal_volume_set: {min: 100, max: 3000}
     resp_rate_set: {min: 0, max: 200}
+
+# ============================================================================
+# ACTION INFERENCE (Step 02)
+# ============================================================================
+action_inference:
+  interval_minutes: 60
+  nee_change_tolerance: 0.03   # mcg/kg/min — minimum meaningful NEE delta
+  include_start_action: false  # start merged into increase → 4 actions
+  time_window_hours: 120       # first vital to +120h
+
+# Action encoding:
+#   0 = stay     (no meaningful NEE change)
+#   1 = increase (NEE goes up by >= tolerance, or new med started)
+#   2 = decrease (NEE goes down by >= tolerance, still > 0)
+#   3 = stop     (NEE drops to 0 from > 0)
+
+# ============================================================================
+# REWARD SIGNAL (Step 04)
+# ============================================================================
+reward:
+  terminal:
+    CPC1_2: 15     # best neurological outcome (home/jail)
+    CPC3: 10       # moderate (rehab/acute care)
+    CPC4: -10      # poor (LTACH/SNF)
+    CPC5: -15      # worst (expired/hospice)
+  intermediate:
+    map_above_65: 1       # +1 per hour if MAP >= 65 mmHg
+    lactate_clearing: 1   # +1 per hour if lactate(t) < lactate(t-1)
