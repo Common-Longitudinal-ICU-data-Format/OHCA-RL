@@ -60,26 +60,36 @@ Follow instructions in [config/README.md](config/README.md). Required fields:
 
 ### 2. Set Up the Environment
 
-Scripts use inline [PEP 723](https://peps.python.org/pep-0723/) metadata and run with `uv`:
+Requires [uv](https://docs.astral.sh/uv/). Install dependencies and create the virtual environment:
+
+```bash
+uv sync
+```
+
+### 3. Run the Pipeline
+
+Run all steps sequentially:
+
+```bash
+bash run_pipeline.sh
+```
+
+Or run individual steps:
 
 ```bash
 uv run code/00_cohort_identification.py
 ```
 
-No virtual environment setup is needed — `uv` resolves dependencies per script automatically.
-
-### 3. Run Code
-
 | Step | Script | Description |
 |------|--------|-------------|
 | 00 | `00_cohort_identification.py` | OHCA cohort identification with CONSORT diagram |
-| 01 | `01_create_wide_df.py` | Pivot CLIF tables into wide DataFrame |
-| 02 | `02_med_processing_and_actions.py` | Medication processing and action space encoding |
-| 03 | `03_sofa_calculator.py` | SOFA score calculation |
-| 04 | `04_prepare_training_data.py` | Feature engineering, reward encoding, train/test split |
+| 01 | `01_sofa_calculator.py` | SOFA score calculation |
+| 02 | `02_create_wide_df.py` | Load CLIF tables, unit conversion, pivot to wide DataFrame |
+| 03 | `03_ffill_and_bucketing.py` | Forward-fill imputation, 1h time bucketing, action inference |
+| 04 | `04_create_tableone.py` | Baseline characteristics table |
 
 Scripts are [marimo](https://marimo.io/) notebooks and can also be run interactively:
 
 ```bash
-marimo edit code/00_cohort_identification.py
+uv run marimo edit code/00_cohort_identification.py
 ```
