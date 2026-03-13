@@ -25,6 +25,7 @@ STEPS=(
     "code/02_create_wide_df.py"
     "code/03_ffill_and_bucketing.py"
     "code/04_create_tableone.py"
+    "code/05_figures.py"
 )
 
 # Run pipeline, tee all stdout+stderr to log file

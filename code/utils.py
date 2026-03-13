@@ -10,10 +10,14 @@ For table loading, outlier handling, and waterfall — use clifpy directly.
 import logging
 import pandas as pd
 import numpy as np
-import duckdb
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Set
+
+try:
+    import duckdb
+except ImportError:
+    duckdb = None  # Only needed for dose conversion functions
 
 logger = logging.getLogger(__name__)
 

@@ -427,6 +427,12 @@ def _(
             ffilled[_col] = ffilled[_col].fillna(0)
             logger.info("  %s: %d NaN → 0 NaN (fillna(0))", _col, _before)
 
+        # 5c-post. FiO2 floor: no patient breathes 0% oxygen
+        if "resp_fio2_set" in ffilled.columns:
+            _below_floor = (ffilled["resp_fio2_set"] < 0.21).sum()
+            ffilled["resp_fio2_set"] = ffilled["resp_fio2_set"].clip(lower=0.21)
+            logger.info("  resp_fio2_set: clipped %d rows to floor 0.21", _below_floor)
+
     else:
         logger.info("  Skipped — no resp numeric columns or resp_device_category missing")
 
@@ -637,7 +643,32 @@ def _(
         .reset_index()
     )
 
-    # --- Post-bucketing ffill: close remaining 1-2 bucket gaps ---
+    # --- Create dense hourly grid (one row per hour per patient, no gaps) ---
+    logger.info("Creating dense hourly grid...")
+    _max_bucket = bucketed_df.groupby("hospitalization_id")["time_bucket"].max()
+    _dense_rows = []
+    for _hid, _mb in _max_bucket.items():
+        _dense_rows.append(pd.DataFrame({
+            "hospitalization_id": _hid,
+            "time_bucket": range(0, int(_mb) + 1),
+        }))
+    _dense_index = pd.concat(_dense_rows, ignore_index=True)
+    _before_dense = len(bucketed_df)
+    bucketed_df = _dense_index.merge(bucketed_df, on=["hospitalization_id", "time_bucket"], how="left")
+    _after_dense = len(bucketed_df)
+    logger.info("Dense grid: %d → %d rows (added %d empty buckets)", _before_dense, _after_dense, _after_dense - _before_dense)
+
+    # Flag scaffold rows (added by dense grid, no original data)
+    _feat_cols_for_scaffold = [
+        c for c in bucketed_df.columns
+        if c not in ("hospitalization_id", "time_bucket")
+    ]
+    bucketed_df["is_scaffold"] = bucketed_df[_feat_cols_for_scaffold].isna().all(axis=1)
+    logger.info("Scaffold rows: %d / %d (%.1f%%)",
+                bucketed_df["is_scaffold"].sum(), len(bucketed_df),
+                100 * bucketed_df["is_scaffold"].mean())
+
+    # --- Post-bucketing ffill: fill newly created empty rows + close gaps ---
     logger.info("Post-bucketing ffill pass to close remaining gaps...")
     _feature_cols = [
         c for c in bucketed_df.columns
@@ -793,10 +824,6 @@ def _(actioned_df, bucket_hours, death_time_df, logger, mo, np, ohca_config, pat
     _cpc_counts = enriched_df.groupby("hospitalization_id")["cpc"].first().value_counts()
     logger.info("CPC distribution (patient-level):\n%s", _cpc_counts.to_string())
 
-    # --- Terminal reward from config ---
-    _reward_map = ohca_config["reward"]["terminal"]
-    enriched_df["terminal_reward"] = enriched_df["cpc"].map(_reward_map).fillna(0).astype(int)
-
     # --- Med booleans: was each med administered (>0) this hour? ---
     _med_cont_dose_cols = [
         c for c in enriched_df.columns
@@ -894,7 +921,7 @@ def _(actioned_df, bucket_hours, death_time_df, logger, mo, np, ohca_config, pat
     | exclude | {_cpc_counts.get('exclude', 0):,} | {_cpc_counts.get('exclude', 0) / _n_hosp * 100:.1f}% |
 
     **Med booleans added**: {len([c for c in enriched_df.columns if c.startswith('on_med_')])} columns
-    **Total new columns**: {len(_new_bool_cols) + 3} (booleans + cpc + terminal_reward + discharge_category)
+    **Total new columns**: {len(_new_bool_cols) + 2} (booleans + cpc + discharge_category)
     """)
     return (enriched_df,)
 
@@ -917,7 +944,7 @@ def _(enriched_df, intermediate_dir, logger, mo):
     _adt_cols = [c for c in enriched_df.columns if c.startswith("adt_")]
     _bool_cols = [c for c in enriched_df.columns if c.startswith("on_med_")]
     _derived_cols = ["in_icu", "in_ed", "on_vaso", "ever_vaso", "on_imv", "ever_imv",
-                     "ever_died", "is_dead", "cpc", "terminal_reward", "action"]
+                     "ever_died", "is_dead", "cpc", "action"]
 
     def _miss(cols):
         _available = [c for c in cols if c in enriched_df.columns]
@@ -995,7 +1022,6 @@ def _(bucket_hours, enriched_df, intermediate_dir, logger, mo, np, patient_stati
         "ever_vaso": ("ever_vaso", "first"),
         "ever_imv": ("ever_imv", "first"),
         "cpc": ("cpc", "first"),
-        "terminal_reward": ("terminal_reward", "first"),
         "discharge_category": ("discharge_category", "first"),
         "total_hours": ("time_bucket", "count"),
         "total_icu_hours": ("in_icu", "sum"),

@@ -295,6 +295,7 @@ def _(
 @app.cell
 def _(
     MedicationAdminContinuous,
+    apply_outlier_handling,
     cohort_hosp_ids,
     compute_nee,
     convert_med_doses,
@@ -317,6 +318,9 @@ def _(
             "med_category": meds_cont_of_interest,
         },
     )
+
+    # Apply clifpy outlier handling (caps implausible doses per med/unit thresholds)
+    apply_outlier_handling(meds_cont_tbl)
 
     meds_cont_df = meds_cont_tbl.df.copy()
     meds_cont_df["hospitalization_id"] = meds_cont_df["hospitalization_id"].astype(str)
@@ -402,6 +406,7 @@ def _(intermediate_dir, meds_cont_df):
 @app.cell
 def _(
     MedicationAdminIntermittent,
+    apply_outlier_handling,
     cohort_hosp_ids,
     convert_med_doses,
     file_type,
@@ -424,6 +429,9 @@ def _(
                 "med_category": meds_int_of_interest,
             },
         )
+
+        # Apply clifpy outlier handling (caps implausible doses)
+        apply_outlier_handling(meds_int_tbl)
 
         _int_df = meds_int_tbl.df.copy()
         _int_df["hospitalization_id"] = _int_df["hospitalization_id"].astype(str)
