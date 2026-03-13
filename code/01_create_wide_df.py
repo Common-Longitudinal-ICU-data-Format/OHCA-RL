@@ -38,6 +38,7 @@ def _():
         MedicationAdminIntermittent,
         RespiratorySupport,
         CrrtTherapy,
+        PatientAssessments,
         Adt,
     )
     from clifpy.utils.outlier_handler import apply_outlier_handling
@@ -94,6 +95,7 @@ def _():
         Labs,
         MedicationAdminContinuous,
         MedicationAdminIntermittent,
+        PatientAssessments,
         RespiratorySupport,
         Vitals,
         apply_outlier_handling,
@@ -125,6 +127,7 @@ def _(cohort_path, mo, ohca_config, pd):
     vitals_of_interest = ohca_config["vitals_of_interest"]
     meds_cont_of_interest = ohca_config["meds_continuous_of_interest"]
     meds_int_of_interest = ohca_config["meds_intermittent_of_interest"]
+    assessments_of_interest = ohca_config["assessments_of_interest"]
 
     mo.md(f"""
     ## Cohort
@@ -136,8 +139,10 @@ def _(cohort_path, mo, ohca_config, pd):
     | **Vitals of interest** | {len(vitals_of_interest)} |
     | **Meds (continuous)** | {len(meds_cont_of_interest)} |
     | **Meds (intermittent)** | {len(meds_int_of_interest)} |
+    | **Assessments** | {len(assessments_of_interest)} |
     """)
     return (
+        assessments_of_interest,
         cohort_df,
         cohort_hosp_ids,
         labs_of_interest,
@@ -372,9 +377,7 @@ def _(
             meds_cont_wide["event_dttm"], utc=True
         )
 
-    # Compute NEE
-    _nee_config = ohca_config.get("nee_coefficients", {})
-    meds_cont_wide["med_cont_nee"] = compute_nee(meds_cont_wide, _nee_config)
+    # NEE is computed post-ffill in step 03 (not here) to avoid aggregation artifacts
 
     # Keep only columns of interest
     _meds_cont_keep = [
@@ -384,7 +387,6 @@ def _(
         "med_cont_epinephrine", "med_cont_isoproterenol", "med_cont_lorazepam",
         "med_cont_midazolam", "med_cont_milrinone", "med_cont_norepinephrine",
         "med_cont_phenylephrine", "med_cont_propofol", "med_cont_vasopressin",
-        "med_cont_nee",
     ]
     meds_cont_wide = meds_cont_wide[[c for c in _meds_cont_keep if c in meds_cont_wide.columns]]
 
@@ -641,6 +643,175 @@ def _(CrrtTherapy, cohort_hosp_ids, file_type, mo, pd, tables_path, timezone):
 
 
 @app.cell
+def _(
+    PatientAssessments,
+    apply_outlier_handling,
+    assessments_of_interest,
+    cohort_hosp_ids,
+    file_type,
+    mo,
+    pd,
+    tables_path,
+    timezone,
+):
+    try:
+        # Load patient assessments via clifpy loader (filtered to cohort + categories)
+        assess_tbl = PatientAssessments.from_file(
+            data_directory=tables_path,
+            filetype=file_type,
+            timezone=timezone,
+            filters={
+                "hospitalization_id": cohort_hosp_ids,
+                "assessment_category": assessments_of_interest,
+            },
+        )
+
+        # Apply clifpy outlier handling (gcs_total: 3-15, RASS: -5 to +4)
+        apply_outlier_handling(assess_tbl)
+
+        # Extract cleaned DataFrame
+        assess_df = assess_tbl.df.copy()
+        assess_df["hospitalization_id"] = assess_df["hospitalization_id"].astype(str)
+        assess_df["assessment_category"] = assess_df["assessment_category"].str.lower()
+
+        # Pivot: narrow → wide on (hospitalization_id, recorded_dttm)
+        assess_wide = assess_df.pivot_table(
+            index=["hospitalization_id", "recorded_dttm"],
+            columns="assessment_category",
+            values="numerical_value",
+            aggfunc="first",
+        ).reset_index()
+
+        # Flatten columns with assess_ prefix
+        assess_wide.columns = [
+            f"assess_{c}" if c not in ("hospitalization_id", "recorded_dttm") else c
+            for c in assess_wide.columns
+        ]
+        assess_wide = assess_wide.rename(columns={"recorded_dttm": "event_dttm"})
+
+        # Ensure datetime is tz-aware
+        if assess_wide["event_dttm"].dtype == object:
+            assess_wide["event_dttm"] = pd.to_datetime(
+                assess_wide["event_dttm"], utc=True
+            )
+
+        # Keep only columns of interest
+        _assess_keep = [
+            "hospitalization_id", "event_dttm",
+            "assess_gcs_total", "assess_rass",
+        ]
+        assess_wide = assess_wide[[c for c in _assess_keep if c in assess_wide.columns]]
+
+        _n_rows = len(assess_wide)
+        _n_hosp = assess_wide["hospitalization_id"].nunique()
+        _n_cohort = len(cohort_hosp_ids)
+        _assess_cols = [c for c in assess_wide.columns if c.startswith("assess_")]
+
+        # --- PI Missingness Report ---
+        _miss_lines = []
+        for _ac in _assess_cols:
+            _patients_with_data = assess_wide.loc[
+                assess_wide[_ac].notna(), "hospitalization_id"
+            ].nunique()
+            _pct_patients = _patients_with_data / _n_cohort * 100
+            _total_obs = assess_wide[_ac].notna().sum()
+            _med_per_patient = (
+                assess_wide.loc[assess_wide[_ac].notna()]
+                .groupby("hospitalization_id")[_ac]
+                .count()
+                .median()
+            ) if _patients_with_data > 0 else 0
+            _miss_lines.append(
+                f"| **{_ac}** | {_patients_with_data:,} / {_n_cohort:,} "
+                f"({_pct_patients:.1f}%) | {_total_obs:,} | {_med_per_patient:.0f} |"
+            )
+
+        # --- Charting Frequency (median hours between consecutive observations) ---
+        _freq_lines = []
+        for _ac in _assess_cols:
+            _obs_times = (
+                assess_wide.loc[assess_wide[_ac].notna(), ["hospitalization_id", "event_dttm"]]
+                .sort_values(["hospitalization_id", "event_dttm"])
+            )
+            if len(_obs_times) > 1:
+                _gaps = _obs_times.groupby("hospitalization_id")["event_dttm"].diff()
+                _median_gap_h = _gaps.dt.total_seconds().dropna().median() / 3600
+                _freq_lines.append(f"| **{_ac}** | {_median_gap_h:.1f} |")
+            else:
+                _freq_lines.append(f"| **{_ac}** | N/A |")
+
+        # --- Missingness by Time Window (% patients with ≥1 obs in each window) ---
+        # Use first assessment per patient as t0 reference
+        _patient_t0 = (
+            assess_wide.groupby("hospitalization_id")["event_dttm"]
+            .min()
+            .reset_index()
+            .rename(columns={"event_dttm": "_t0"})
+        )
+        _with_t0 = assess_wide.merge(_patient_t0, on="hospitalization_id")
+        _with_t0["_hours_since_t0"] = (
+            (_with_t0["event_dttm"] - _with_t0["_t0"]).dt.total_seconds() / 3600
+        )
+
+        _windows = [(0, 24), (24, 48), (48, 72), (72, 120)]
+        _window_lines = []
+        for _ac in _assess_cols:
+            _cells = []
+            for _ws, _we in _windows:
+                _window_df = _with_t0[
+                    (_with_t0["_hours_since_t0"] >= _ws) & (_with_t0["_hours_since_t0"] < _we)
+                ]
+                _pts_in_window = _window_df["hospitalization_id"].nunique()
+                _pts_with_obs = _window_df.loc[
+                    _window_df[_ac].notna(), "hospitalization_id"
+                ].nunique()
+                _pct = (_pts_with_obs / _pts_in_window * 100) if _pts_in_window > 0 else 0
+                _cells.append(f"{_pts_with_obs}/{_pts_in_window} ({_pct:.0f}%)")
+            _window_lines.append(f"| **{_ac}** | {' | '.join(_cells)} |")
+
+        _msg = f"""
+        ## Checkpoint: Patient Assessments (GCS, RASS)
+
+        | Metric | Value |
+        |--------|-------|
+        | **Rows** | {_n_rows:,} |
+        | **Hospitalizations** | {_n_hosp:,} |
+        | **Columns** | {', '.join(_assess_cols)} |
+
+        ### PI Missingness Report
+
+        | Variable | Patients with data | Total obs | Median obs/patient |
+        |----------|-------------------|-----------|-------------------|
+        {chr(10).join(_miss_lines)}
+
+        ### Charting Frequency
+
+        | Variable | Median hours between obs |
+        |----------|--------------------------|
+        {chr(10).join(_freq_lines)}
+
+        ### Missingness by Time Window (patients with ≥1 obs, relative to first assessment)
+
+        | Variable | 0–24h | 24–48h | 48–72h | 72–120h |
+        |----------|-------|--------|--------|---------|
+        {chr(10).join(_window_lines)}
+
+        ### Value Distributions
+        {assess_wide[_assess_cols].describe().to_markdown()}
+        """
+    except Exception as _e:
+        assess_wide = pd.DataFrame(columns=["hospitalization_id", "event_dttm"])
+        _msg = f"""
+        ## Checkpoint: Patient Assessments
+
+        Table not available or error: {_e}. Skipping.
+        """
+
+    mo.md(_msg)
+    return (assess_wide,)
+
+
+@app.cell
 def _(Adt, cohort_hosp_ids, file_type, mo, tables_path, timezone):
     # Load ADT via individual clifpy loader (filtered to cohort at source)
     adt_tbl = Adt.from_file(
@@ -689,6 +860,7 @@ def _(Adt, cohort_hosp_ids, file_type, mo, tables_path, timezone):
 @app.cell
 def _(
     adt_wide,
+    assess_wide,
     crrt_wide,
     intermediate_dir,
     labs_wide,
@@ -707,6 +879,7 @@ def _(
         ("meds_int", meds_int_wide),
         ("resp", resp_wide),
         ("crrt", crrt_wide),
+        ("assess", assess_wide),
         ("adt", adt_wide),
     ]:
         if len(_df) > 0 and "event_dttm" in _df.columns:
@@ -734,6 +907,7 @@ def _(
     _med_int_cols = [c for c in wide_df.columns if c.startswith("med_int_")]
     _resp_cols = [c for c in wide_df.columns if c.startswith("resp_")]
     _crrt_cols = [c for c in wide_df.columns if c.startswith("crrt_")]
+    _assess_cols = [c for c in wide_df.columns if c.startswith("assess_")]
     _adt_cols = [c for c in wide_df.columns if c.startswith("adt_")]
 
     def _group_miss(cols):
@@ -777,6 +951,7 @@ def _(
     | Meds intermittent (`med_int_*`) | {len(_med_int_cols)} | {_group_miss(_med_int_cols)} |
     | Respiratory (`resp_*`) | {len(_resp_cols)} | {_group_miss(_resp_cols)} |
     | CRRT (`crrt_*`) | {len(_crrt_cols)} | {_group_miss(_crrt_cols)} |
+    | Assessments (`assess_*`) | {len(_assess_cols)} | {_group_miss(_assess_cols)} |
     | ADT (`adt_*`) | {len(_adt_cols)} | {_group_miss(_adt_cols)} |
 
     ### All Columns

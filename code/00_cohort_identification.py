@@ -384,12 +384,13 @@ def _(cohort_ohca_first, con, mo, pd, strobe_counts):
         cohort_ohca_first["hospitalization_id"].astype(str).isin(icu_id_set)
     ].copy()
 
-    # Drop patients with invalid discharge_category (e.g. "still admitted" — no terminal reward possible)
-    _invalid_dc = cohort_ohca_icu["discharge_category"].str.lower().str.strip() == "still admitted"
+    # Drop patients whose discharge_category maps to CPC "exclude" (no valid reward)
+    _exclude_dc = ["still admitted", "missing", "other"]
+    _invalid_dc = cohort_ohca_icu["discharge_category"].str.lower().str.strip().isin(_exclude_dc)
     _n_invalid_dc = _invalid_dc.sum()
     if _n_invalid_dc > 0:
         cohort_ohca_icu = cohort_ohca_icu[~_invalid_dc].copy()
-    strobe_counts["4_excluded_still_admitted"] = int(_n_invalid_dc)
+    strobe_counts["4_excluded_unclassifiable_dc"] = int(_n_invalid_dc)
 
     n_icu_patients = cohort_ohca_icu["patient_id"].nunique()
     n_icu_encounters = cohort_ohca_icu["hospitalization_id"].nunique()
@@ -440,7 +441,7 @@ def _(cohort_ohca_first, con, mo, pd, strobe_counts):
     | **Patients** | **{n_icu_patients:,}** |
     | Encounters | {n_icu_encounters:,} |
     | Excluded (no ICU) | {n_excluded_no_icu:,} |
-    | Excluded (still admitted) | {_n_invalid_dc:,} |
+    | Excluded (unclassifiable discharge) | {_n_invalid_dc:,} |
     | Survivors | {n_surv:,} |
     | Non-Survivors | {n_died:,} |
     | **Mortality** | **{mortality_pct:.1f}%** |

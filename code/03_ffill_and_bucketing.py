@@ -105,6 +105,7 @@ def _():
         c for c in wide_df.columns
         if c in ("resp_tracheostomy",)
     ]
+    assess_cols = [c for c in wide_df.columns if c.startswith("assess_")]
 
     _n_rows = len(wide_df)
     _n_hosp = wide_df["hospitalization_id"].nunique()
@@ -124,8 +125,10 @@ def _():
     | **Med int cols** | {len(med_int_cols)} |
     | **Resp numeric cols** | {len(resp_numeric_cols)} |
     | **Resp categorical cols** | {len(resp_categorical_cols)} |
+    | **Assess cols** | {len(assess_cols)} |
     """)
     return (
+        assess_cols,
         bucket_hours,
         compute_missingness,
         death_time_df,
@@ -152,6 +155,7 @@ def _():
 # ── Cell 2: Missingness BEFORE ffill ──────────────────────────────────
 @app.cell
 def _(
+    assess_cols,
     compute_missingness,
     final_dir,
     lab_cols,
@@ -168,7 +172,7 @@ def _(
 ):
     _all_numeric_cols = (
         vital_cols + lab_cols + med_cont_cols + med_int_cols
-        + resp_numeric_cols + resp_binary_cols
+        + resp_numeric_cols + resp_binary_cols + assess_cols
     )
     _all_cols = _all_numeric_cols + resp_categorical_cols
     if "on_crrt" in wide_df.columns:
@@ -190,6 +194,7 @@ def _(
 # ── Cell 3: Forward-Fill ────────────────────────────────────────────────
 @app.cell
 def _(
+    assess_cols,
     lab_cols,
     logger,
     med_cont_cols,
@@ -304,6 +309,37 @@ def _(
             ffilled[_col] = ffilled[_col].fillna(_cohort_med)
             logger.info("  %s: %d NaN → 0 NaN (filled with cohort median=%.2f)", _col, _before, _cohort_med)
 
+    # --- 2c. Assessments (GCS, RASS): time-limited ffill, NO default imputation ---
+    # GCS and RASS are charted q4-6h. 8h ffill covers one missed charting period.
+    # CRITICAL: Do NOT impute missing values — OHCA patients are deeply comatose (GCS 3)
+    # and heavily sedated (RASS -5). Normal-value imputation (GCS=15, RASS=0) would be
+    # clinically incorrect for this population. NaN stays NaN.
+    _assess_ffill_hours = ohca_config.get("assessments_ffill_hours", 8)
+    _assess_max_delta = pd.Timedelta(hours=_assess_ffill_hours)
+    _available_assess_cols = [c for c in assess_cols if c in ffilled.columns]
+    if _available_assess_cols:
+        logger.info("Step 2c: Forward-filling assessments (%dh time-limited, NO default imputation)...",
+                    _assess_ffill_hours)
+        for _col in _available_assess_cols:
+            _before = ffilled[_col].isna().sum()
+
+            # Vectorized time-limited ffill (same pattern as labs)
+            _notna_mask = ffilled[_col].notna()
+            _last_valid_time = ffilled["event_dttm"].where(_notna_mask)
+            _last_valid_time = _last_valid_time.groupby(
+                ffilled["hospitalization_id"]
+            ).ffill()
+            _time_gap = ffilled["event_dttm"] - _last_valid_time
+            _filled_vals = ffilled.groupby("hospitalization_id")[_col].ffill()
+            ffilled[_col] = _filled_vals.where(_time_gap <= _assess_max_delta)
+
+            _after = ffilled[_col].isna().sum()
+            if _before != _after:
+                logger.info("  %s: %d NaN → %d NaN (filled %d, %dh limit)",
+                            _col, _before, _after, _before - _after, _assess_ffill_hours)
+
+        logger.info("  Assessments: remaining NaN left as NaN (no safe default for OHCA)")
+
     # --- 3a. Continuous meds: unlimited ffill between observations, time-limited after last ---
     # These are infusion RATES (mcg/kg/min) — rate stays constant between charting events.
     # Logic:
@@ -345,6 +381,17 @@ def _(
         _after = ffilled[_col].isna().sum()
         _n_trailing_clipped = _beyond_limit.sum()
         logger.info("  %s: %d NaN → %d NaN (trailing clipped: %d)", _col, _before, _after, _n_trailing_clipped)
+
+    # --- 3a-post. Compute NEE from ffilled vasopressor doses ---
+    # NEE is computed here (post-ffill, pre-bucketing) so that each row has a
+    # self-consistent NEE reflecting all ffilled component doses at that timestamp.
+    _nee_coefs = ohca_config["nee_coefficients"]
+    ffilled["med_cont_nee"] = sum(
+        ffilled[f"med_cont_{med}"].fillna(0) * coef
+        for med, coef in _nee_coefs.items()
+        if f"med_cont_{med}" in ffilled.columns
+    )
+    logger.info("Computed NEE from ffilled doses: %d non-zero rows", (ffilled["med_cont_nee"] > 0).sum())
 
     # --- 3b. Intermittent meds: NO ffill — bolus doses are discrete events ---
     # These are single-dose administrations (mg). The dose exists only at the
@@ -636,6 +683,10 @@ def _(
         elif _col.startswith("med_int_"):
             # Intermittent bolus doses: use MAX (largest dose given that hour)
             _agg_dict[_col] = "max"
+        elif _col.startswith("assess_"):
+            # Assessments (GCS, RASS): use LAST value (end-of-bucket state)
+            # Consistent with RL "current state" convention.
+            _agg_dict[_col] = "last"
         elif _col == "on_crrt":
             _agg_dict[_col] = "max"
         else:
@@ -708,6 +759,10 @@ def _(
     if len(_still_missing) > 0:
         logger.info("Final fillna for %d columns with remaining NaN...", len(_still_missing))
         for _col in _still_missing.index:
+            # SKIP assessments — no safe default for OHCA population
+            if _col.startswith("assess_"):
+                logger.info("  %s: %d NaN left as NaN (no safe default for OHCA)", _col, _still_missing[_col])
+                continue
             _med = bucketed_df[_col].median()
             bucketed_df[_col] = bucketed_df[_col].fillna(_med)
             logger.info("  %s: %d NaN filled with cohort median=%.2f", _col, _still_missing[_col], _med)
@@ -955,6 +1010,7 @@ def _(enriched_df, intermediate_dir, logger, mo):
     _med_int_cols = [c for c in enriched_df.columns if c.startswith("med_int_")]
     _resp_cols = [c for c in enriched_df.columns if c.startswith("resp_")]
     _crrt_cols = [c for c in enriched_df.columns if c.startswith("crrt_") or c == "on_crrt"]
+    _assess_cols = [c for c in enriched_df.columns if c.startswith("assess_")]
     _adt_cols = [c for c in enriched_df.columns if c.startswith("adt_")]
     _bool_cols = [c for c in enriched_df.columns if c.startswith("on_med_")]
     _derived_cols = ["in_icu", "in_ed", "on_vaso", "ever_vaso", "on_imv", "ever_imv",
@@ -987,6 +1043,7 @@ def _(enriched_df, intermediate_dir, logger, mo):
     | Meds intermittent | {len(_med_int_cols)} | {_miss(_med_int_cols)} |
     | Respiratory | {len(_resp_cols)} | {_miss(_resp_cols)} |
     | CRRT | {len(_crrt_cols)} | {_miss(_crrt_cols)} |
+    | Assessments | {len(_assess_cols)} | {_miss(_assess_cols)} |
     | ADT | {len(_adt_cols)} | {_miss(_adt_cols)} |
     | Med booleans | {len(_bool_cols)} | {_miss(_bool_cols)} |
     | Derived | {len(_derived_cols)} | — |
@@ -1041,6 +1098,11 @@ def _(bucket_hours, enriched_df, intermediate_dir, logger, mo, np, patient_stati
     }
     if "lab_lactate" in enriched_df.columns:
         _agg_dict["max_lactate"] = ("lab_lactate", "max")
+    if "assess_gcs_total" in enriched_df.columns:
+        _agg_dict["min_gcs"] = ("assess_gcs_total", "min")
+        _agg_dict["median_gcs"] = ("assess_gcs_total", "median")
+    if "assess_rass" in enriched_df.columns:
+        _agg_dict["median_rass"] = ("assess_rass", "median")
     _patient_flags = enriched_df.groupby("hospitalization_id").agg(**_agg_dict).reset_index()
 
     # Scale hours by bucket size

@@ -188,6 +188,21 @@ meds_intermittent_preferred_units:
   valproate: mg
 
 # ============================================================================
+# PATIENT ASSESSMENTS
+# ============================================================================
+assessments_of_interest:
+  - gcs_total
+  - RASS
+
+assessments_ffill_hours: 8   # q4-6h charting → 8h time-limited ffill
+
+patient_assessments_required_columns:
+  - hospitalization_id
+  - recorded_dttm
+  - assessment_category
+  - numerical_value
+
+# ============================================================================
 # RESPIRATORY SUPPORT
 # ============================================================================
 respiratory_columns_numeric:

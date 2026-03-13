@@ -39,6 +39,7 @@ output/
 code/archive
 code/__pycache__/
 output_ucmc/
+output_mimic/
 config/config_ucmc.json
 # temp ignored
 config_mimic.json

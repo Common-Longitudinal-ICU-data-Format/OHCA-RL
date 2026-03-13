@@ -271,6 +271,15 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
         add_continuous("Max lactate", "max_lactate")
     add_continuous("Total observation hours", "total_hours")
 
+    # ── Neurological Assessments ──
+    add_header("Neurological Assessments")
+    if "min_gcs" in t1_df.columns:
+        add_continuous("Minimum GCS (over stay)", "min_gcs")
+    if "median_gcs" in t1_df.columns:
+        add_continuous("Median GCS", "median_gcs")
+    if "median_rass" in t1_df.columns:
+        add_continuous("Median RASS", "median_rass")
+
     # ── Outcomes ──
     add_header("Outcomes")
     add_binary("In-hospital mortality, n (%)", "ever_died")
@@ -403,9 +412,11 @@ def _(bucketed_df, fmt_median_iqr, logger, mo, np, pd):
         "Labs": [c for c in bucketed_df.columns if c.startswith("lab_")],
         "Meds (continuous)": [c for c in bucketed_df.columns if c.startswith("med_cont_")],
         "Respiratory": [c for c in bucketed_df.columns if c.startswith("resp_") and bucketed_df[c].dtype in [np.float64, np.int64, np.float32, np.int32]],
+        "Assessments": [c for c in bucketed_df.columns if c.startswith("assess_")],
     }
 
     _feat_rows = []
+    _n_total = len(bucketed_df)
     for _group, _cols in _feature_groups.items():
         for _col in sorted(_cols):
             _valid = bucketed_df[_col].dropna()
@@ -419,6 +430,7 @@ def _(bucketed_df, fmt_median_iqr, logger, mo, np, pd):
                 "Min": f"{_valid.min():.2f}",
                 "Max": f"{_valid.max():.2f}",
                 "% Zero": f"{(_valid == 0).mean() * 100:.1f}%",
+                "% NaN": f"{bucketed_df[_col].isna().mean() * 100:.1f}%",
             })
     feature_summary = pd.DataFrame(_feat_rows)
 
