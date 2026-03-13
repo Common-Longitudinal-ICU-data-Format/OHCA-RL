@@ -207,6 +207,21 @@ def _(
     ffilled = wide_df.copy()
     ffilled["event_dttm"] = pd.to_datetime(ffilled["event_dttm"], utc=True)
 
+    # ── Pre-ffill: remove sentinel/placeholder and clamp outliers ──
+    if "lab_glucose_serum" in ffilled.columns:
+        _sentinel_mask = ffilled["lab_glucose_serum"] <= 1
+        _n_sentinel = _sentinel_mask.sum()
+        if _n_sentinel > 0:
+            ffilled.loc[_sentinel_mask, "lab_glucose_serum"] = np.nan
+            logger.info("Removed %d glucose sentinel values (<=1) before ffill", _n_sentinel)
+
+    if "lab_ph_arterial" in ffilled.columns:
+        _ph_oob = (ffilled["lab_ph_arterial"] < 6.5) | (ffilled["lab_ph_arterial"] > 7.8)
+        _n_ph_oob = _ph_oob.sum()
+        if _n_ph_oob > 0:
+            ffilled.loc[_ph_oob, "lab_ph_arterial"] = np.nan
+            logger.info("Removed %d pH outliers (outside 6.5-7.8) before ffill", _n_ph_oob)
+
     # ── Normal values for fallback imputation (from config) ──
     _lab_normal_values = {
         f"lab_{k}": v
@@ -393,11 +408,11 @@ def _(
             ffilled.loc[_room_air, "resp_fio2_set"] = ffilled.loc[_room_air, "resp_fio2_set"].fillna(0.21)
             logger.info("  fio2 (room air → 0.21): filled %d", _b - ffilled.loc[_room_air, "resp_fio2_set"].isna().sum())
 
-        # Nasal cannula: fio2 from lpm (0.24 + 0.04*LPM), peep=0
+        # Nasal cannula: fio2 from lpm (0.20 + 0.04*LPM), peep=0
         _nc = _dc_lower == "nasal cannula"
         if "resp_fio2_set" in ffilled.columns and "resp_lpm_set" in ffilled.columns:
             _nc_fio2_missing = _nc & ffilled["resp_fio2_set"].isna() & ffilled["resp_lpm_set"].notna()
-            _imputed_fio2 = (0.24 + 0.04 * ffilled.loc[_nc_fio2_missing, "resp_lpm_set"]).clip(upper=1.0)
+            _imputed_fio2 = (0.20 + 0.04 * ffilled.loc[_nc_fio2_missing, "resp_lpm_set"]).clip(upper=1.0)
             ffilled.loc[_nc_fio2_missing, "resp_fio2_set"] = _imputed_fio2
             logger.info("  fio2 (NC from LPM): filled %d", _nc_fio2_missing.sum())
 
@@ -584,7 +599,7 @@ def _(
     # Clip to time window (0 to time_window_hours)
     _before_clip = len(bucketing_df)
     bucketing_df = bucketing_df[
-        bucketing_df["hours_since_t0"] <= time_window_hours
+        bucketing_df["hours_since_t0"] < time_window_hours
     ].copy()
     _after_clip = len(bucketing_df)
     logger.info("Clipped to 0-%dh window (t0=first event): %d → %d rows (dropped %d)", time_window_hours, _before_clip, _after_clip, _before_clip - _after_clip)
@@ -681,12 +696,11 @@ def _(
         _before = bucketed_df[_col].isna().sum()
         if _before == 0:
             continue
-        # ffill then bfill within patient to close leading/trailing gaps
+        # ffill within patient to carry forward last known value (no bfill to avoid future leak)
         bucketed_df[_col] = bucketed_df.groupby("hospitalization_id")[_col].ffill()
-        bucketed_df[_col] = bucketed_df.groupby("hospitalization_id")[_col].bfill()
         _after = bucketed_df[_col].isna().sum()
         if _before != _after:
-            logger.info("  %s: %d NaN → %d NaN (post-bucket ffill/bfill)", _col, _before, _after)
+            logger.info("  %s: %d NaN → %d NaN (post-bucket ffill)", _col, _before, _after)
 
     # Final safety: any remaining NaN (patients with zero data for a variable)
     _remaining_nan = bucketed_df[_num_feat].isna().sum()
@@ -1010,12 +1024,6 @@ def _(bucket_hours, enriched_df, intermediate_dir, logger, mo, np, patient_stati
     ]
     _sofa_pivot = _sofa_pivot.reset_index()
 
-    # Also get SOFA subscores for the first window (0-24h) for Table 1
-    _sofa_first = _sofa[_sofa["sofa_window"] == 0].copy()
-    _sofa_subscores = ["sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_resp", "sofa_cns", "sofa_renal"]
-    _sofa_first_cols = _sofa_first[["hospitalization_id"] + _sofa_subscores].copy()
-    _sofa_first_cols.columns = ["hospitalization_id"] + [f"{c}_0_24" for c in _sofa_subscores]
-
     # --- Patient-level flags from bucketed df ---
     _agg_dict = {
         "ever_died": ("ever_died", "first"),
@@ -1050,7 +1058,6 @@ def _(bucket_hours, enriched_df, intermediate_dir, logger, mo, np, patient_stati
         .merge(_demo, on="hospitalization_id", how="left")
         .merge(_patient_flags, on="hospitalization_id", how="left")
         .merge(_sofa_pivot, on="hospitalization_id", how="left")
-        .merge(_sofa_first_cols, on="hospitalization_id", how="left")
     )
 
     # Save

@@ -274,7 +274,7 @@ outlier_ranges:
     dbp: {min: 0, max: 200}
     map: {min: 0, max: 150}
     spo2: {min: 50, max: 100}
-    temp_c: {min: 32, max: 44}
+    temp_c: {min: 28, max: 44}
     weight_kg: {min: 30, max: 1100}
     height_cm: {min: 76, max: 255}
 
@@ -289,7 +289,7 @@ outlier_ranges:
     lactate: {min: 0.0, max: 30.0}
     magnesium: {min: 0.0, max: 10.0}
     pco2_arterial: {min: 5.0, max: 200.0}
-    ph_arterial: {min: 6.0, max: 10.0}
+    ph_arterial: {min: 6.5, max: 7.8}
     po2_arterial: {min: 0.0, max: 800.0}
     potassium: {min: 0.0, max: 15.0}
     so2_arterial: {min: 0.0, max: 100.0}

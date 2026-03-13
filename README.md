@@ -83,8 +83,8 @@ uv run code/00_cohort_identification.py
 | Step | Script | Description |
 |------|--------|-------------|
 | 00 | `00_cohort_identification.py` | OHCA cohort identification with CONSORT diagram |
-| 01 | `01_sofa_calculator.py` | SOFA score calculation |
-| 02 | `02_create_wide_df.py` | Load CLIF tables, unit conversion, pivot to wide DataFrame |
+| 01 | `01_create_wide_df.py` | Load CLIF tables, unit conversion, pivot to wide DataFrame |
+| 02 | `02_sofa_calculator.py` | SOFA score calculation |
 | 03 | `03_ffill_and_bucketing.py` | Forward-fill imputation, 1h time bucketing, action inference |
 | 04 | `04_create_tableone.py` | Baseline characteristics table |
 

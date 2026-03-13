@@ -51,6 +51,14 @@ def _():
     cohort_df = pd.read_parquet(intermediate_dir / "cohort_ohca_icu.parquet")
     cohort_hosp_ids = cohort_df["hospitalization_id"].astype(str).unique().tolist()
 
+    # Load t0 mapping (first event_dttm per patient, saved by step 02)
+    _t0_path = intermediate_dir / "t0_mapping.parquet"
+    t0_map = pd.read_parquet(_t0_path)
+    t0_map["hospitalization_id"] = t0_map["hospitalization_id"].astype(str)
+    cohort_df = cohort_df.merge(t0_map, on="hospitalization_id", how="left")
+    # Fallback to admission_dttm if t0 is missing (should not happen)
+    cohort_df["t0_dttm"] = cohort_df["t0_dttm"].fillna(pd.to_datetime(cohort_df["admission_dttm"]))
+
     # 24h windows: 0-24, 24-48, 48-72, 72-96, 96-120
     n_windows = TIME_WINDOW_HRS // 24
 
@@ -178,11 +186,11 @@ def _(
 
         print(f"Computing SOFA for window {_w}: {_start_h}–{_end_h}h ...")
 
-        # Build cohort time window
+        # Build cohort time window (anchored to t0 = first event_dttm)
         _window_cohort = pd.DataFrame({
             "hospitalization_id": cohort_df["hospitalization_id"].astype(str),
-            "start_time": pd.to_datetime(cohort_df["admission_dttm"]) + pd.Timedelta(hours=_start_h),
-            "end_time": pd.to_datetime(cohort_df["admission_dttm"]) + pd.Timedelta(hours=_end_h),
+            "start_time": pd.to_datetime(cohort_df["t0_dttm"]) + pd.Timedelta(hours=_start_h),
+            "end_time": pd.to_datetime(cohort_df["t0_dttm"]) + pd.Timedelta(hours=_end_h),
         })
 
         # Create wide dataset for this window

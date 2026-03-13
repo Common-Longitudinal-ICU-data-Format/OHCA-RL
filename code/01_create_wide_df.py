@@ -48,7 +48,7 @@ def _():
         setup_logging,
     )
 
-    logger = setup_logging("02_create_wide_df")
+    logger = setup_logging("01_create_wide_df")
 
     # Project root
     project_root = Path(__file__).parent.parent.resolve()
@@ -200,6 +200,16 @@ def _(
         for c in vitals_wide.columns
     ]
     vitals_wide = vitals_wide.rename(columns={"recorded_dttm": "event_dttm"})
+
+    # Recalculate MAP from SBP/DBP (raw MAP can have artifact values)
+    if "vital_sbp" in vitals_wide.columns and "vital_dbp" in vitals_wide.columns:
+        _has_bp = vitals_wide["vital_sbp"].notna() & vitals_wide["vital_dbp"].notna()
+        vitals_wide["vital_map"] = np.where(
+            _has_bp,
+            (vitals_wide["vital_sbp"] + 2 * vitals_wide["vital_dbp"]) / 3,
+            np.nan,
+        )
+        logger.info("Recalculated MAP = (SBP + 2*DBP)/3 for %d rows", _has_bp.sum())
 
     _n_rows = len(vitals_wide)
     _n_hosp = vitals_wide["hospitalization_id"].nunique()
@@ -730,6 +740,16 @@ def _(
         if not cols:
             return "N/A"
         return f"{wide_df[cols].isna().mean().mean() * 100:.1f}%"
+
+    # Save t0 mapping (first event_dttm per patient) for SOFA alignment
+    _t0_map = (
+        wide_df.groupby("hospitalization_id")["event_dttm"]
+        .min()
+        .reset_index()
+        .rename(columns={"event_dttm": "t0_dttm"})
+    )
+    _t0_map.to_parquet(intermediate_dir / "t0_mapping.parquet", index=False)
+    logger.info("Saved t0_mapping.parquet (%d patients)", len(_t0_map))
 
     # Save
     _output_path = intermediate_dir / "wide_df.parquet"

@@ -232,9 +232,9 @@ def impute_fio2(df: pd.DataFrame) -> pd.DataFrame:
         & df["lpm_set"].notna()
     )
     if _nc_mask.any():
-        # Use formula: 0.24 + 0.04 * LPM (continuous, not just integer lookup)
+        # Use formula: 0.20 + 0.04 * LPM (matches NC_LPM_TO_FIO2 lookup table)
         df.loc[_nc_mask, "fio2_set"] = (
-            0.24 + 0.04 * df.loc[_nc_mask, "lpm_set"]
+            0.20 + 0.04 * df.loc[_nc_mask, "lpm_set"]
         ).clip(upper=1.0)
 
     _n_ra = _ra_mask.sum()

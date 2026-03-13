@@ -21,8 +21,8 @@ echo "=========================================="
 
 STEPS=(
     "code/00_cohort_identification.py"
-    "code/01_sofa_calculator.py"
-    "code/02_create_wide_df.py"
+    "code/01_create_wide_df.py"
+    "code/02_sofa_calculator.py"
     "code/03_ffill_and_bucketing.py"
     "code/04_create_tableone.py"
     "code/05_figures.py"
