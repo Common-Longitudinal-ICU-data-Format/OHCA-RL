@@ -27,11 +27,8 @@ def _():
     import yaml
     from pathlib import Path
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s | %(name)s | %(message)s",
-    )
-    logger = logging.getLogger("04_tableone")
+    from utils import setup_logging
+    logger = setup_logging("04_create_tableone")
 
     project_root = Path(__file__).parent.parent.resolve()
 
@@ -122,6 +119,24 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
                          "sex_category", "race_category", "ethnicity_category"]],
         on="hospitalization_id", how="left", suffixes=("", "_static"),
     )
+    # Derive ever_crrt from total_crrt_hours
+    if "total_crrt_hours" in t1_df.columns:
+        t1_df["ever_crrt"] = (t1_df["total_crrt_hours"] > 0).astype(int)
+
+    # Compute Hospital LOS (days) from patient_static
+    if "admission_dttm" in patient_static.columns and "discharge_dttm" in patient_static.columns:
+        _los = patient_static[["hospitalization_id", "admission_dttm", "discharge_dttm"]].copy()
+        _los["hospital_los_days"] = (
+            (pd.to_datetime(_los["discharge_dttm"]) - pd.to_datetime(_los["admission_dttm"]))
+            .dt.total_seconds() / 86400
+        )
+        t1_df = t1_df.merge(_los[["hospitalization_id", "hospital_los_days"]],
+                             on="hospitalization_id", how="left")
+
+    # Compute ICU LOS (days) from total_icu_hours
+    if "total_icu_hours" in t1_df.columns:
+        t1_df["icu_los_days"] = t1_df["total_icu_hours"] / 24
+
     # Use static demographics if summary doesn't have them
     for _col in ["age_at_admission", "sex_category", "race_category", "ethnicity_category"]:
         _static_col = f"{_col}_static"
@@ -222,24 +237,25 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
 
     # ── CPC Outcome ──
     add_header("Neurological Outcome (CPC)")
-    _cpc_levels = ["CPC1_2", "CPC3", "CPC4", "CPC5", "exclude"]
+    _cpc_levels = ["CPC1_2", "CPC3", "CPC4", "CPC5"]
+    # Check for unmatched discharge categories (CPC = "exclude")
+    _exclude_mask = t1_df["cpc"] == "exclude"
+    if _exclude_mask.any():
+        _unmatched = t1_df.loc[_exclude_mask, "discharge_category"].unique().tolist()
+        logger.warning("CPC 'exclude': %d patients with unmatched discharge_category: %s",
+                        _exclude_mask.sum(), _unmatched)
     add_categorical("CPC", "cpc", _cpc_levels)
 
-    # ── SOFA Scores by 24h Window ──
+    # ── SOFA Scores by 24h Window (total only, no subscores) ──
     add_header("SOFA Scores")
     _sofa_total_cols = sorted([c for c in summary_df.columns
                                 if c.startswith("sofa_") and c.count("_") == 2
                                 and not any(s in c for s in ["cv", "coag", "liver", "resp", "cns", "renal"])])
     for _col in _sofa_total_cols:
-        _label = _col.replace("_", " to ", 1).replace("_", "h–") + "h"
-        add_continuous(f"SOFA {_label}", _col)
-
-    # SOFA subscores (0-24h)
-    _sofa_sub_cols = sorted([c for c in summary_df.columns if c.endswith("_0_24") and "sofa_" in c])
-    if _sofa_sub_cols:
-        for _col in _sofa_sub_cols:
-            _label = _col.replace("_0_24", "").replace("sofa_", "SOFA ")
-            add_continuous(f"{_label} (0–24h)", _col)
+        # e.g. sofa_0_24 → "SOFA 0–24h"
+        _parts = _col.split("_")  # ["sofa", "0", "24"]
+        _label = f"SOFA {_parts[1]}–{_parts[2]}h"
+        add_continuous(_label, _col)
 
     # ── Treatment Characteristics ──
     add_header("Treatment")
@@ -249,7 +265,7 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
     add_continuous("Total ED hours", "total_ed_hours")
     add_continuous("Total vasopressor hours", "total_vaso_hours")
     add_continuous("Total IMV hours", "total_imv_hours")
-    add_continuous("Total CRRT hours", "total_crrt_hours")
+    add_binary("Ever CRRT, n (%)", "ever_crrt")
     add_continuous("Max NEE (mcg/kg/min)", "max_nee")
     if "max_lactate" in summary_df.columns:
         add_continuous("Max lactate", "max_lactate")
@@ -258,6 +274,8 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
     # ── Outcomes ──
     add_header("Outcomes")
     add_binary("In-hospital mortality, n (%)", "ever_died")
+    add_continuous("Hospital LOS (days)", "hospital_los_days")
+    add_continuous("ICU LOS (days)", "icu_los_days")
 
     # Build DataFrame
     table1 = pd.DataFrame(rows, columns=["Variable", "Level"] + sg_names)

@@ -11,9 +11,57 @@ import logging
 import pandas as pd
 import numpy as np
 import duckdb
+from datetime import datetime
+from pathlib import Path
 from typing import Tuple, Set
 
 logger = logging.getLogger(__name__)
+
+
+def setup_logging(name: str, log_dir: str | Path | None = None) -> logging.Logger:
+    """Configure logging to both console and a log file.
+
+    Parameters
+    ----------
+    name : str
+        Logger name (e.g., "03_ffill_bucketing"). Also used for the log filename.
+    log_dir : str or Path, optional
+        Directory for log files. Defaults to ``<project_root>/output/final/``.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance.
+    """
+    if log_dir is None:
+        log_dir = Path(__file__).parent.parent / "output" / "final"
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_dir / f"{name}.log"
+    fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    # Get or create logger
+    _logger = logging.getLogger(name)
+    _logger.setLevel(logging.INFO)
+
+    # Avoid duplicate handlers on re-import
+    if not _logger.handlers:
+        # Console handler
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        _logger.addHandler(ch)
+
+        # File handler (overwrite each run)
+        fh = logging.FileHandler(log_file, mode="w")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        _logger.addHandler(fh)
+
+    _logger.info("Logging to %s", log_file)
+    return _logger
 
 
 # =============================================================================

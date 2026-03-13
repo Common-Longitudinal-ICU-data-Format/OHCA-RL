@@ -27,11 +27,8 @@ def _():
     import yaml
     from pathlib import Path
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s | %(name)s | %(message)s",
-    )
-    logger = logging.getLogger("02_ffill_bucketing")
+    from utils import setup_logging
+    logger = setup_logging("03_ffill_and_bucketing")
 
     project_root = Path(__file__).parent.parent.resolve()
 

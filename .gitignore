@@ -37,6 +37,7 @@ __pychache__/
 references/
 output/
 code/archive
+code/__pycache__/
 
 # temp ignored
 config_mimic.json

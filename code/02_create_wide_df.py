@@ -45,10 +45,10 @@ def _():
     from utils import (
         build_weight_table, convert_med_doses, compute_nee,
         categorize_device_from_tracheostomy, categorize_device, impute_fio2,
+        setup_logging,
     )
 
-    # Configure logging for dose conversion
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
+    logger = setup_logging("02_create_wide_df")
 
     # Project root
     project_root = Path(__file__).parent.parent.resolve()
