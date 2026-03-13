@@ -103,6 +103,39 @@ def _():
         logger.info("Saved %s.pdf", name)
         plt.close(fig)
 
+    def save_hourly_continuous(cols, groups, filepath, time_col="time_bucket"):
+        """Save hourly n/mean/sd/se/median/q25/q75 by group for continuous cols."""
+        _rows = []
+        for _gname, _gdf in groups.items():
+            for _col in cols:
+                _stats = _gdf.groupby(time_col)[_col].agg(["count", "mean", "std", "median"])
+                _stats.columns = ["n", "mean", "sd", "median"]
+                _stats["q25"] = _gdf.groupby(time_col)[_col].quantile(0.25)
+                _stats["q75"] = _gdf.groupby(time_col)[_col].quantile(0.75)
+                _stats["se"] = _stats["sd"] / np.sqrt(_stats["n"])
+                _stats = _stats.reset_index()
+                _stats["group"] = _gname
+                _stats["variable"] = _col
+                _stats["site"] = site_name
+                _rows.append(_stats)
+        pd.concat(_rows, ignore_index=True).to_csv(filepath, index=False)
+        logger.info("Saved %s", filepath.name)
+
+    def save_hourly_binary(cols, groups, filepath, time_col="time_bucket"):
+        """Save hourly n/count/proportion/se by group for binary cols."""
+        _rows = []
+        for _gname, _gdf in groups.items():
+            for _col in cols:
+                _stats = _gdf.groupby(time_col)[_col].agg(["count", "sum", "mean"]).reset_index()
+                _stats.columns = [time_col, "n", "count", "proportion"]
+                _stats["se"] = np.sqrt(_stats["proportion"] * (1 - _stats["proportion"]) / _stats["n"])
+                _stats["group"] = _gname
+                _stats["variable"] = _col
+                _stats["site"] = site_name
+                _rows.append(_stats)
+        pd.concat(_rows, ignore_index=True).to_csv(filepath, index=False)
+        logger.info("Saved %s", filepath.name)
+
     # Drop runt bucket 120 (partial edge bucket with very few patients)
     bucketed_df = bucketed_df[bucketed_df["time_bucket"] < 120]
 
@@ -142,6 +175,8 @@ def _():
         plot_pct_over_time,
         plt,
         save_fig,
+        save_hourly_binary,
+        save_hourly_continuous,
         site_name,
         sns,
         summary_df,
@@ -224,7 +259,7 @@ def _(final_dir, logger, mo, np, pd, plt, save_fig, sns):
 
 # ── Cell 3: Figure 2 — Vasopressor/NEE Temporal ──────────────────────
 @app.cell
-def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iqr, plot_pct_over_time, plt, save_fig, surv_df):
+def _(COLOR_DEAD, COLOR_SURV, add_day_lines, bucketed_df, dead_df, fig_dir, logger, mo, np, pd, plot_median_iqr, plot_pct_over_time, plt, save_fig, save_hourly_binary, save_hourly_continuous, site_name, surv_df):
     logger.info("Figure 2: Vasopressor/NEE temporal...")
 
     fig2, (ax2a, ax2b) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
@@ -252,13 +287,46 @@ def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iq
     ax2b.set_xlim(0, 120)
     fig2.tight_layout()
     save_fig(fig2, "fig2_vasopressor_nee")
+
+    # Save CSV data for multi-site aggregation
+    _groups = {"overall": bucketed_df, "survivors": surv_df, "non_survivors": dead_df}
+    _vaso_binary = []
+    for _gname, _gdf in _groups.items():
+        _stats = _gdf.groupby("time_bucket")["on_vaso"].agg(["count", "sum", "mean"]).reset_index()
+        _stats.columns = ["time_bucket", "n", "count", "proportion"]
+        _stats["se"] = np.sqrt(_stats["proportion"] * (1 - _stats["proportion"]) / _stats["n"])
+        _stats["group"] = _gname
+        _stats["variable"] = "on_vaso"
+        _stats["site"] = site_name
+        _vaso_binary.append(_stats)
+    # NEE among vaso users only
+    _surv_on = surv_df[surv_df["med_cont_nee"] > 0]
+    _dead_on = dead_df[dead_df["med_cont_nee"] > 0]
+    _all_on = bucketed_df[bucketed_df["med_cont_nee"] > 0]
+    _nee_groups = {"overall": _all_on, "survivors": _surv_on, "non_survivors": _dead_on}
+    _nee_rows = []
+    for _gname, _gdf in _nee_groups.items():
+        _stats = _gdf.groupby("time_bucket")["med_cont_nee"].agg(["count", "mean", "std", "median"])
+        _stats.columns = ["n", "mean", "sd", "median"]
+        _stats["q25"] = _gdf.groupby("time_bucket")["med_cont_nee"].quantile(0.25)
+        _stats["q75"] = _gdf.groupby("time_bucket")["med_cont_nee"].quantile(0.75)
+        _stats["se"] = _stats["sd"] / np.sqrt(_stats["n"])
+        _stats = _stats.reset_index()
+        _stats["group"] = _gname
+        _stats["variable"] = "med_cont_nee"
+        _stats["site"] = site_name
+        _nee_rows.append(_stats)
+    _fig2_csv = pd.concat(_vaso_binary + _nee_rows, ignore_index=True)
+    _fig2_csv.to_csv(fig_dir / "fig2_vasopressor_nee.csv", index=False)
+    logger.info("Saved fig2_vasopressor_nee.csv")
+
     mo.md("### Figure 2: Vasopressor/NEE\n\n![](figures/fig2_vasopressor_nee.pdf)")
     return
 
 
 # ── Cell 4: Figure 3 — Treatment Timelines ───────────────────────────
 @app.cell
-def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_pct_over_time, plt, save_fig, surv_df):
+def _(COLOR_DEAD, COLOR_SURV, add_day_lines, bucketed_df, dead_df, fig_dir, logger, mo, plot_pct_over_time, plt, save_fig, save_hourly_binary, surv_df):
     logger.info("Figure 3: Treatment timelines...")
 
     _treatments = [
@@ -283,13 +351,18 @@ def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_pct_over_
     fig3.suptitle("Organ Support Utilization Over 120 Hours", fontsize=14, y=1.01)
     fig3.tight_layout()
     save_fig(fig3, "fig3_treatment_timelines")
+    save_hourly_binary(
+        ["on_vaso", "on_imv", "on_crrt"],
+        {"overall": bucketed_df, "survivors": surv_df, "non_survivors": dead_df},
+        fig_dir / "fig3_treatment_timelines.csv",
+    )
     mo.md("### Figure 3: Treatment Timelines\n\n![](figures/fig3_treatment_timelines.pdf)")
     return
 
 
 # ── Cell 5: Figure 4 — SOFA Trajectory ───────────────────────────────
 @app.cell
-def _(COLOR_DEAD, COLOR_SURV, logger, mo, np, pd, plt, save_fig, sns, summary_df):
+def _(COLOR_DEAD, COLOR_SURV, fig_dir, logger, mo, np, pd, plt, save_fig, site_name, sns, summary_df):
     logger.info("Figure 4: SOFA trajectory...")
 
     # Identify SOFA total columns (sofa_0_24, sofa_24_48, etc.)
@@ -328,13 +401,36 @@ def _(COLOR_DEAD, COLOR_SURV, logger, mo, np, pd, plt, save_fig, sns, summary_df
         ax4.legend(title="", frameon=False)
         fig4.tight_layout()
         save_fig(fig4, "fig4_sofa_trajectory")
+
+        # Save CSV for multi-site aggregation
+        _sofa_csv_rows = []
+        for _gname, _gdf in {"overall": summary_df,
+                              "survivors": summary_df[summary_df["ever_died"] == 0],
+                              "non_survivors": summary_df[summary_df["ever_died"] == 1]}.items():
+            for _col in _sofa_cols:
+                _parts = _col.split("_")
+                _window = f"{_parts[1]}–{_parts[2]}h"
+                _valid = _gdf[_col].dropna()
+                if len(_valid) == 0:
+                    continue
+                _sofa_csv_rows.append({
+                    "sofa_window": _window, "group": _gname,
+                    "n": len(_valid), "mean": float(_valid.mean()),
+                    "sd": float(_valid.std()), "se": float(_valid.std() / np.sqrt(len(_valid))),
+                    "median": float(_valid.median()),
+                    "q25": float(_valid.quantile(0.25)), "q75": float(_valid.quantile(0.75)),
+                    "site": site_name,
+                })
+        pd.DataFrame(_sofa_csv_rows).to_csv(fig_dir / "fig4_sofa_trajectory.csv", index=False)
+        logger.info("Saved fig4_sofa_trajectory.csv")
+
         mo.md("### Figure 4: SOFA Trajectory\n\n![](figures/fig4_sofa_trajectory.pdf)")
     return
 
 
 # ── Cell 6: Figure 5 — Vital Signs ───────────────────────────────────
 @app.cell
-def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iqr, plt, save_fig, surv_df):
+def _(COLOR_DEAD, COLOR_SURV, add_day_lines, bucketed_df, dead_df, fig_dir, logger, mo, plot_median_iqr, plt, save_fig, save_hourly_continuous, surv_df):
     logger.info("Figure 5: Vital signs...")
 
     _vitals = [
@@ -361,13 +457,18 @@ def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iq
     fig5.suptitle("Key Vital Signs Over 120 Hours", fontsize=14)
     fig5.tight_layout()
     save_fig(fig5, "fig5_vital_signs")
+    save_hourly_continuous(
+        ["vital_heart_rate", "vital_map", "vital_temp_c", "vital_respiratory_rate"],
+        {"overall": bucketed_df, "survivors": surv_df, "non_survivors": dead_df},
+        fig_dir / "fig5_vital_signs.csv",
+    )
     mo.md("### Figure 5: Vital Signs\n\n![](figures/fig5_vital_signs.pdf)")
     return
 
 
 # ── Cell 7: Figure 6 — Action Distribution Over Time ─────────────────
 @app.cell
-def _(ACTION_COLORS, ACTION_LABELS, add_day_lines, bucketed_df, logger, mo, np, pd, plt, save_fig):
+def _(ACTION_COLORS, ACTION_LABELS, add_day_lines, bucketed_df, fig_dir, logger, mo, np, pd, plt, save_fig, site_name):
     logger.info("Figure 6: Action distribution over time...")
 
     # Compute action proportions per time bucket
@@ -395,13 +496,30 @@ def _(ACTION_COLORS, ACTION_LABELS, add_day_lines, bucketed_df, logger, mo, np, 
     add_day_lines(ax6)
     fig6.tight_layout()
     save_fig(fig6, "fig6_action_distribution")
+
+    # Save CSV for multi-site aggregation
+    _act_csv_rows = []
+    _n_per_bucket = bucketed_df.groupby("time_bucket")["action"].count()
+    for _a in range(4):
+        _counts = bucketed_df[bucketed_df["action"] == _a].groupby("time_bucket")["action"].count()
+        for _t in _action_props.index:
+            _act_csv_rows.append({
+                "time_bucket": _t, "action": _a, "action_label": ACTION_LABELS[_a],
+                "n": int(_n_per_bucket.get(_t, 0)),
+                "count": int(_counts.get(_t, 0)),
+                "proportion": float(_action_props.loc[_t, _a]) if _t in _action_props.index else 0,
+                "site": site_name,
+            })
+    pd.DataFrame(_act_csv_rows).to_csv(fig_dir / "fig6_action_distribution.csv", index=False)
+    logger.info("Saved fig6_action_distribution.csv")
+
     mo.md("### Figure 6: Action Distribution\n\n![](figures/fig6_action_distribution.pdf)")
     return
 
 
 # ── Cell 8: Figure 7 — Lactate & Key Labs ────────────────────────────
 @app.cell
-def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iqr, plt, save_fig, surv_df):
+def _(COLOR_DEAD, COLOR_SURV, add_day_lines, bucketed_df, dead_df, fig_dir, logger, mo, plot_median_iqr, plt, save_fig, save_hourly_continuous, surv_df):
     logger.info("Figure 7: Lactate & key labs...")
 
     _labs = [
@@ -425,6 +543,11 @@ def _(COLOR_DEAD, COLOR_SURV, add_day_lines, dead_df, logger, mo, plot_median_iq
     fig7.suptitle("Key Lab Trajectories Over 120 Hours", fontsize=14, y=1.01)
     fig7.tight_layout()
     save_fig(fig7, "fig7_labs")
+    save_hourly_continuous(
+        ["lab_lactate", "lab_creatinine", "lab_hemoglobin"],
+        {"overall": bucketed_df, "survivors": surv_df, "non_survivors": dead_df},
+        fig_dir / "fig7_labs.csv",
+    )
     mo.md("### Figure 7: Lab Trajectories\n\n![](figures/fig7_labs.pdf)")
     return
 

@@ -68,11 +68,19 @@ uv sync
 
 ### 3. Run the Pipeline
 
-Run all steps sequentially:
+**Mac/Linux:**
 
 ```bash
 bash run_pipeline.sh
 ```
+
+**Windows:**
+
+```cmd
+run_pipeline.bat
+```
+
+Both scripts run all steps sequentially, halt on first failure, and save a timestamped log to `output/final/pipeline_<timestamp>.log`.
 
 Or run individual steps:
 
@@ -87,6 +95,7 @@ uv run code/00_cohort_identification.py
 | 02 | `02_sofa_calculator.py` | SOFA score calculation |
 | 03 | `03_ffill_and_bucketing.py` | Forward-fill imputation, 1h time bucketing, action inference |
 | 04 | `04_create_tableone.py` | Baseline characteristics table |
+| 05 | `05_figures.py` | Pre-training figures (PDFs + CSVs for multi-site aggregation) |
 
 Scripts are [marimo](https://marimo.io/) notebooks and can also be run interactively:
 
