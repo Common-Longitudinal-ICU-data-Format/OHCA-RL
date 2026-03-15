@@ -43,3 +43,6 @@ output_mimic/
 config/config_ucmc.json
 # temp ignored
 config_mimic.json
+
+shared/
+code/ohca_training.py

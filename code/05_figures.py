@@ -98,9 +98,10 @@ def _():
             ax.axvline(_h, color="grey", linestyle="--", alpha=0.3, linewidth=0.5)
 
     def save_fig(fig, name):
-        """Save figure as PDF."""
-        fig.savefig(fig_dir / f"{name}.pdf")
-        logger.info("Saved %s.pdf", name)
+        """Save figure as PDF (300dpi) and PNG (150dpi for dashboard embedding)."""
+        fig.savefig(fig_dir / f"{name}.pdf", dpi=300)
+        fig.savefig(fig_dir / f"{name}.png", dpi=150)
+        logger.info("Saved %s.pdf and %s.png", name, name)
         plt.close(fig)
 
     def save_hourly_continuous(cols, groups, filepath, time_col="time_bucket"):

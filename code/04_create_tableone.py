@@ -108,7 +108,7 @@ def _():
     return fmt_mean_sd, fmt_median_iqr, fmt_n_pct
 
 
-# ── Cell 3: Build Table 1 ──────────────────────────────────────────────
+# ── Cell 3: Prepare t1_df & Build Table 1 Function ────────────────────
 @app.cell
 def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, summary_df):
     logger.info("Building Table 1...")
@@ -144,157 +144,151 @@ def _(fmt_median_iqr, fmt_n_pct, logger, mo, np, pd, patient_static, site_name, 
             t1_df[_col] = t1_df[_col].fillna(t1_df[_static_col])
             t1_df = t1_df.drop(columns=[_static_col])
 
-    # Define subgroups
-    _survivors = t1_df[t1_df["ever_died"] == 0]
-    _non_survivors = t1_df[t1_df["ever_died"] == 1]
+    # ── Reusable Table 1 builder ──
+    def build_table1(df_in, site, sofa_cols):
+        """Build Table 1 for a given population DataFrame.
+        Returns (table1_df, long_df).
+        """
+        _survivors = df_in[df_in["ever_died"] == 0]
+        _non_survivors = df_in[df_in["ever_died"] == 1]
+        _subgroups = {"Overall": df_in, "Survivors": _survivors, "Non-Survivors": _non_survivors}
+        _sg_names = list(_subgroups.keys())
+        _long_rows = []
+        _rows = []
 
-    subgroups = {
-        "Overall": t1_df,
-        "Survivors": _survivors,
-        "Non-Survivors": _non_survivors,
-    }
-    sg_names = list(subgroups.keys())
+        def _add_header(text):
+            _rows.append([f"**{text}**", ""] + [""] * len(_sg_names))
 
-    # Machine-readable long-format rows
-    long_rows = []
+        def _add_count_row(label):
+            _row = [label, ""]
+            for _sn, _sd in _subgroups.items():
+                _row.append(str(len(_sd)))
+                _long_rows.append({"variable": label, "level": "", "subgroup": _sn,
+                                   "stat_type": "count", "n": len(_sd), "total": len(_sd)})
+            _rows.append(_row)
 
-    # Build table rows
-    rows = []
+        def _add_continuous(label, col_name):
+            _row = [label, ""]
+            for _sn, _sd in _subgroups.items():
+                if col_name in _sd.columns:
+                    _row.append(fmt_median_iqr(_sd[col_name]))
+                    _v = _sd[col_name].dropna()
+                    _long_rows.append({
+                        "variable": label, "level": "", "subgroup": _sn,
+                        "stat_type": "continuous", "n": len(_v), "total": len(_sd),
+                        "median": float(_v.median()) if len(_v) > 0 else None,
+                        "q25": float(_v.quantile(0.25)) if len(_v) > 0 else None,
+                        "q75": float(_v.quantile(0.75)) if len(_v) > 0 else None,
+                    })
+                else:
+                    _row.append("—")
+            _rows.append(_row)
 
-    def add_header(text):
-        rows.append([f"**{text}**", ""] + [""] * len(sg_names))
+        def _add_categorical(label, col_name, levels):
+            for _level in levels:
+                _row = [f"{label}, n (%)", str(_level)]
+                for _sn, _sd in _subgroups.items():
+                    if col_name not in _sd.columns:
+                        _row.append("—")
+                        continue
+                    _count = int((_sd[col_name] == _level).sum())
+                    _total = len(_sd)
+                    _row.append(fmt_n_pct(_count, _total))
+                    _long_rows.append({"variable": label, "level": str(_level), "subgroup": _sn,
+                                       "stat_type": "categorical", "n": _count, "total": _total})
+                _rows.append(_row)
 
-    def add_count_row(label):
-        row = [label, ""]
-        for _sg_name, _sg_df in subgroups.items():
-            row.append(str(len(_sg_df)))
-            long_rows.append({
-                "variable": label, "level": "", "subgroup": _sg_name,
-                "stat_type": "count", "n": len(_sg_df), "total": len(_sg_df),
-            })
-        rows.append(row)
-
-    def add_continuous(label, col_name):
-        row = [label, ""]
-        for _sg_name, _sg_df in subgroups.items():
-            if col_name in _sg_df.columns:
-                row.append(fmt_median_iqr(_sg_df[col_name]))
-                _valid = _sg_df[col_name].dropna()
-                long_rows.append({
-                    "variable": label, "level": "", "subgroup": _sg_name,
-                    "stat_type": "continuous", "n": len(_valid), "total": len(_sg_df),
-                    "median": float(_valid.median()) if len(_valid) > 0 else None,
-                    "q25": float(_valid.quantile(0.25)) if len(_valid) > 0 else None,
-                    "q75": float(_valid.quantile(0.75)) if len(_valid) > 0 else None,
-                })
-            else:
-                row.append("—")
-        rows.append(row)
-
-    def add_categorical(label, col_name, levels):
-        for _level in levels:
-            row = [f"{label}, n (%)", str(_level)]
-            for _sg_name, _sg_df in subgroups.items():
-                if col_name not in _sg_df.columns:
-                    row.append("—")
+        def _add_binary(label, col_name):
+            _row = [label, ""]
+            for _sn, _sd in _subgroups.items():
+                if col_name not in _sd.columns:
+                    _row.append("—")
                     continue
-                _count = int((_sg_df[col_name] == _level).sum())
-                _total = len(_sg_df)
-                row.append(fmt_n_pct(_count, _total))
-                long_rows.append({
-                    "variable": label, "level": str(_level), "subgroup": _sg_name,
-                    "stat_type": "categorical", "n": _count, "total": _total,
-                })
-            rows.append(row)
+                _count = int(_sd[col_name].sum())
+                _total = len(_sd)
+                _row.append(fmt_n_pct(_count, _total))
+                _long_rows.append({"variable": label, "level": "yes", "subgroup": _sn,
+                                   "stat_type": "binary", "n": _count, "total": _total})
+            _rows.append(_row)
 
-    def add_binary(label, col_name):
-        row = [label, ""]
-        for _sg_name, _sg_df in subgroups.items():
-            if col_name not in _sg_df.columns:
-                row.append("—")
-                continue
-            _count = int(_sg_df[col_name].sum())
-            _total = len(_sg_df)
-            row.append(fmt_n_pct(_count, _total))
-            long_rows.append({
-                "variable": label, "level": "yes", "subgroup": _sg_name,
-                "stat_type": "binary", "n": _count, "total": _total,
-            })
-        rows.append(row)
+        # ── Counts ──
+        _add_count_row("N")
 
-    # ── Counts ──
-    add_count_row("N")
+        # ── Demographics ──
+        _add_header("Demographics")
+        _add_continuous("Age, median [IQR]", "age_at_admission")
+        _sex_levels = sorted(df_in["sex_category"].dropna().unique().tolist())
+        _add_categorical("Sex", "sex_category", _sex_levels)
+        _race_levels = sorted(df_in["race_category"].dropna().unique().tolist())
+        _add_categorical("Race", "race_category", _race_levels)
+        _eth_levels = sorted(df_in["ethnicity_category"].dropna().unique().tolist())
+        _add_categorical("Ethnicity", "ethnicity_category", _eth_levels)
 
-    # ── Demographics ──
-    add_header("Demographics")
-    add_continuous("Age, median [IQR]", "age_at_admission")
-    _sex_levels = sorted(t1_df["sex_category"].dropna().unique().tolist())
-    add_categorical("Sex", "sex_category", _sex_levels)
-    _race_levels = sorted(t1_df["race_category"].dropna().unique().tolist())
-    add_categorical("Race", "race_category", _race_levels)
-    _eth_levels = sorted(t1_df["ethnicity_category"].dropna().unique().tolist())
-    add_categorical("Ethnicity", "ethnicity_category", _eth_levels)
+        # ── CPC Outcome ──
+        _add_header("Neurological Outcome (CPC)")
+        _cpc_levels = ["CPC1_2", "CPC3", "CPC4", "CPC5"]
+        _add_categorical("CPC", "cpc", _cpc_levels)
 
-    # ── CPC Outcome ──
-    add_header("Neurological Outcome (CPC)")
-    _cpc_levels = ["CPC1_2", "CPC3", "CPC4", "CPC5"]
+        # ── SOFA Scores ──
+        _add_header("SOFA Scores")
+        for _col in sofa_cols:
+            _parts = _col.split("_")
+            _label = f"SOFA {_parts[1]}–{_parts[2]}h"
+            _add_continuous(_label, _col)
+
+        # ── Treatment Characteristics ──
+        _add_header("Treatment")
+        _add_binary("Ever vasopressors, n (%)", "ever_vaso")
+        _add_binary("Ever IMV, n (%)", "ever_imv")
+        _add_continuous("Total ICU hours", "total_icu_hours")
+        _add_continuous("Total ED hours", "total_ed_hours")
+        _add_continuous("Total vasopressor hours", "total_vaso_hours")
+        _add_continuous("Total IMV hours", "total_imv_hours")
+        _add_binary("Ever CRRT, n (%)", "ever_crrt")
+        _add_continuous("Max NEE (mcg/kg/min)", "max_nee")
+        if "max_lactate" in df_in.columns:
+            _add_continuous("Max lactate", "max_lactate")
+        _add_continuous("Total observation hours", "total_hours")
+
+        # ── Neurological Assessments ──
+        _add_header("Neurological Assessments")
+        if "min_gcs" in df_in.columns:
+            _add_continuous("Minimum GCS (over stay)", "min_gcs")
+        if "median_gcs" in df_in.columns:
+            _add_continuous("Median GCS", "median_gcs")
+        if "median_rass" in df_in.columns:
+            _add_continuous("Median RASS", "median_rass")
+
+        # ── Outcomes ──
+        _add_header("Outcomes")
+        _add_binary("In-hospital mortality, n (%)", "ever_died")
+        _add_continuous("Hospital LOS (days)", "hospital_los_days")
+        _add_continuous("ICU LOS (days)", "icu_los_days")
+
+        # Build DataFrames
+        _table = pd.DataFrame(_rows, columns=["Variable", "Level"] + _sg_names)
+        _long = pd.DataFrame(_long_rows)
+        _long["site"] = site
+        return _table, _long
+
+    # Identify SOFA total columns
+    sofa_total_cols = sorted([c for c in summary_df.columns
+                               if c.startswith("sofa_") and c.count("_") == 2
+                               and not any(s in c for s in ["cv", "coag", "liver", "resp", "cns", "renal"])])
+
     # Check for unmatched discharge categories (CPC = "exclude")
     _exclude_mask = t1_df["cpc"] == "exclude"
     if _exclude_mask.any():
         _unmatched = t1_df.loc[_exclude_mask, "discharge_category"].unique().tolist()
         logger.warning("CPC 'exclude': %d patients with unmatched discharge_category: %s",
                         _exclude_mask.sum(), _unmatched)
-    add_categorical("CPC", "cpc", _cpc_levels)
 
-    # ── SOFA Scores by 24h Window (total only, no subscores) ──
-    add_header("SOFA Scores")
-    _sofa_total_cols = sorted([c for c in summary_df.columns
-                                if c.startswith("sofa_") and c.count("_") == 2
-                                and not any(s in c for s in ["cv", "coag", "liver", "resp", "cns", "renal"])])
-    for _col in _sofa_total_cols:
-        # e.g. sofa_0_24 → "SOFA 0–24h"
-        _parts = _col.split("_")  # ["sofa", "0", "24"]
-        _label = f"SOFA {_parts[1]}–{_parts[2]}h"
-        add_continuous(_label, _col)
+    # Build full-cohort Table 1
+    table1, long_df = build_table1(t1_df, site_name, sofa_total_cols)
+    logger.info("Table 1 (full cohort): %d rows, %d patients", len(table1), len(t1_df))
 
-    # ── Treatment Characteristics ──
-    add_header("Treatment")
-    add_binary("Ever vasopressors, n (%)", "ever_vaso")
-    add_binary("Ever IMV, n (%)", "ever_imv")
-    add_continuous("Total ICU hours", "total_icu_hours")
-    add_continuous("Total ED hours", "total_ed_hours")
-    add_continuous("Total vasopressor hours", "total_vaso_hours")
-    add_continuous("Total IMV hours", "total_imv_hours")
-    add_binary("Ever CRRT, n (%)", "ever_crrt")
-    add_continuous("Max NEE (mcg/kg/min)", "max_nee")
-    if "max_lactate" in summary_df.columns:
-        add_continuous("Max lactate", "max_lactate")
-    add_continuous("Total observation hours", "total_hours")
-
-    # ── Neurological Assessments ──
-    add_header("Neurological Assessments")
-    if "min_gcs" in t1_df.columns:
-        add_continuous("Minimum GCS (over stay)", "min_gcs")
-    if "median_gcs" in t1_df.columns:
-        add_continuous("Median GCS", "median_gcs")
-    if "median_rass" in t1_df.columns:
-        add_continuous("Median RASS", "median_rass")
-
-    # ── Outcomes ──
-    add_header("Outcomes")
-    add_binary("In-hospital mortality, n (%)", "ever_died")
-    add_continuous("Hospital LOS (days)", "hospital_los_days")
-    add_continuous("ICU LOS (days)", "icu_los_days")
-
-    # Build DataFrame
-    table1 = pd.DataFrame(rows, columns=["Variable", "Level"] + sg_names)
-    long_df = pd.DataFrame(long_rows)
-    long_df["site"] = site_name
-
-    logger.info("Table 1: %d rows", len(table1))
-
-    mo.md("### Table 1 Preview\n\n" + table1.to_markdown(index=False))
-    return long_df, table1, t1_df
+    mo.md("### Table 1 Preview (Full Cohort)\n\n" + table1.to_markdown(index=False))
+    return build_table1, long_df, sofa_total_cols, table1, t1_df
 
 
 # ── Cell 4: Save Table 1 ──────────────────────────────────────────────
@@ -360,6 +354,112 @@ def _(final_dir, logger, long_df, mo, pd, site_name, table1):
     | Long CSV | `{_long_path}` |
     | HTML | `{_html_path}` |
     """)
+    return
+
+
+# ── Cell 4b: Vaso-Only Table 1 ────────────────────────────────────────────
+@app.cell
+def _(build_table1, final_dir, logger, mo, pd, site_name, sofa_total_cols, t1_df):
+    logger.info("Building vaso-only Table 1...")
+
+    t1_df_vaso = t1_df[t1_df["ever_vaso"] == 1].copy()
+    table1_vaso, long_df_vaso = build_table1(t1_df_vaso, site_name, sofa_total_cols)
+    logger.info("Table 1 (vaso cohort): %d rows, %d patients", len(table1_vaso), len(t1_df_vaso))
+
+    # Save CSV
+    table1_vaso.to_csv(final_dir / "table1_ohca_vaso.csv", index=False)
+    long_df_vaso.to_csv(final_dir / "table1_ohca_vaso_long.csv", index=False)
+
+    # Save HTML
+    _html_vaso = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Table 1 - OHCA-RL Vasopressor Cohort</title>
+    <style>
+        body {{ font-family: 'Arial', sans-serif; margin: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px;
+                      box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 3px solid #E53935; padding-bottom: 10px; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }}
+        th {{ background: #E53935; color: white; padding: 12px; text-align: left;
+              border: 1px solid #ddd; }}
+        td {{ padding: 10px; border: 1px solid #ddd; vertical-align: top; }}
+        tr:nth-child(even) {{ background: #f9f9f9; }}
+        tr:hover {{ background: #f0f0f0; }}
+        .section-header {{ background: #ffebee !important; font-weight: bold; }}
+        .footer {{ margin-top: 20px; padding-top: 10px; border-top: 1px solid #ddd;
+                   font-size: 11px; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Table 1: OHCA-RL Vasopressor Cohort — {site_name}</h1>
+        <p><em>Population: Patients who received vasopressors during ICU stay (training cohort)</em></p>
+        <p><em>Continuous variables: median [Q1, Q3] &bull; Categorical variables: n (%)</em></p>
+        {table1_vaso.to_html(index=False, escape=False, classes='table')}
+        <div class="footer">
+            <p>Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+    </div>
+</body>
+</html>"""
+    with open(final_dir / "table1_ohca_vaso.html", "w", encoding="utf-8") as _f:
+        _f.write(_html_vaso)
+
+    logger.info("Saved vaso-only Table 1: CSV, long CSV, HTML")
+
+    mo.md(f"""
+    ### Vaso-Only Table 1
+
+    **Vasopressor patients**: {len(t1_df_vaso):,} / {len(t1_df):,} ({len(t1_df_vaso)/len(t1_df)*100:.1f}%)
+
+    {table1_vaso.to_markdown(index=False)}
+    """)
+    return
+
+
+# ── Cell 4c: Update STROBE Counts with Vaso Population ──────────────────
+@app.cell
+def _(final_dir, logger, mo, pd, site_name, t1_df):
+    _strobe_path = final_dir / "strobe_counts.csv"
+    if _strobe_path.exists():
+        _strobe_df = pd.read_csv(_strobe_path)
+
+        # Remove any prior vaso rows (idempotent)
+        _strobe_df = _strobe_df[~_strobe_df["counter"].str.startswith("5_")]
+
+        _n_vaso = int(t1_df["ever_vaso"].sum())
+        _n_no_vaso = len(t1_df) - _n_vaso
+        _n_vaso_surv = int(t1_df.loc[t1_df["ever_vaso"] == 1, "ever_died"].eq(0).sum())
+        _n_vaso_dead = int(t1_df.loc[t1_df["ever_vaso"] == 1, "ever_died"].eq(1).sum())
+
+        _new_rows = pd.DataFrame([
+            {"counter": "5_vaso_patients", "value": _n_vaso, "site": site_name},
+            {"counter": "5_excluded_no_vaso", "value": _n_no_vaso, "site": site_name},
+            {"counter": "5_vaso_survivors", "value": _n_vaso_surv, "site": site_name},
+            {"counter": "5_vaso_non_survivors", "value": _n_vaso_dead, "site": site_name},
+            {"counter": "5_vaso_mortality_pct", "value": round(_n_vaso_dead / _n_vaso * 100, 1) if _n_vaso > 0 else 0, "site": site_name},
+        ])
+        _strobe_df = pd.concat([_strobe_df, _new_rows], ignore_index=True)
+        _strobe_df.to_csv(_strobe_path, index=False)
+        logger.info("Updated strobe_counts.csv with vaso population counts")
+
+        mo.md(f"""
+        ### STROBE Updated
+
+        | Step | Count |
+        |------|-------|
+        | ICU Admitted | {len(t1_df):,} |
+        | **Vasopressor patients** | **{_n_vaso:,}** |
+        | Excluded (no vasopressors) | {_n_no_vaso:,} |
+        | Vaso — Survivors | {_n_vaso_surv:,} |
+        | Vaso — Non-Survivors | {_n_vaso_dead:,} |
+        | Vaso — Mortality | {_n_vaso_dead / _n_vaso * 100:.1f}% |
+        """)
+    else:
+        logger.warning("strobe_counts.csv not found — skipping STROBE update")
+        mo.md("**Warning**: `strobe_counts.csv` not found. Run step 00 first.")
     return
 
 

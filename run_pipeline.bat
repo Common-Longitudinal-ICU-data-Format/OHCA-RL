@@ -39,8 +39,9 @@ set STEPS[2]=code\02_sofa_calculator.py
 set STEPS[3]=code\03_ffill_and_bucketing.py
 set STEPS[4]=code\04_create_tableone.py
 set STEPS[5]=code\05_figures.py
+set STEPS[6]=code\06_training.py
 
-for %%i in (0 1 2 3 4 5) do (
+for %%i in (0 1 2 3 4 5 6) do (
     echo.
     echo ------------------------------------------
     echo   Running: !STEPS[%%i]!
