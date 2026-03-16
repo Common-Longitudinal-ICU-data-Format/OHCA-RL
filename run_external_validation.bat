@@ -7,6 +7,7 @@ REM Usage: run_external_validation.bat
 REM See SITE_INSTRUCTIONS.md for full setup guide.
 
 setlocal enabledelayedexpansion
+set PYTHONIOENCODING=utf-8
 
 REM Change to the directory where this script lives
 cd /d "%~dp0"

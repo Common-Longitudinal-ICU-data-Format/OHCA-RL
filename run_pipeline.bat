@@ -7,6 +7,7 @@ REM Logs: Each script writes its own log to output\final\<script_name>.log
 REM        Combined pipeline output is saved to output\final\pipeline_<timestamp>.log
 
 setlocal enabledelayedexpansion
+set PYTHONIOENCODING=utf-8
 
 REM Change to the directory where this script lives
 cd /d "%~dp0"
