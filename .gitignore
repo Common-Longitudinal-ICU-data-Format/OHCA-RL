@@ -46,3 +46,5 @@ config_mimic.json
 
 shared/
 code/ohca_training.py
+all_site_data/
+code/test_adjusted_concordance.py

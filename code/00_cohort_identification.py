@@ -122,6 +122,12 @@ def _(
     dx_df = dx_obj.df
     adt_df = adt_obj.df
 
+    # Normalize _id columns to str (sites may store as int or str in parquet)
+    for _df in [hosp_df, dx_df, adt_df]:
+        for _col in _df.columns:
+            if _col.endswith("_id"):
+                _df[_col] = _df[_col].astype(str)
+
     # Register in DuckDB for SQL queries
     con = duckdb.connect()
     con.register("hosp_tbl", hosp_df)
@@ -625,6 +631,7 @@ def _(cohort_ohca_icu, con, mo, output_dir, pd, tables_path):
 
     # Load clif_patient for demographics + death_dttm
     _pat_df = pd.read_parquet(f"{tables_path}/clif_patient.parquet")
+    _pat_df["patient_id"] = _pat_df["patient_id"].astype(str)
 
     # Get discharge_dttm and age from hospitalization table (already loaded as hosp_tbl in DuckDB)
     _hosp_extra = con.execute("""

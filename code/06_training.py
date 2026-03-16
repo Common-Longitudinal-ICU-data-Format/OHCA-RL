@@ -159,6 +159,11 @@ def _(df, mo, pd):
         ]), "resp_mode_group"] = "controlled_or_mandatory_ventilation"
 
         dummies = pd.get_dummies(df_new["resp_mode_group"], prefix="resp_mode")
+        for _expected in ["resp_mode_spontaneous_or_lighter_support",
+                          "resp_mode_controlled_or_mandatory_ventilation",
+                          "resp_mode_unknown_or_other"]:
+            if _expected not in dummies.columns:
+                dummies[_expected] = 0
         df_new = pd.concat([df_new, dummies], axis=1)
         return df_new
 
@@ -188,6 +193,10 @@ def _(df, mo, pd):
         ]), "resp_device_group"] = "high_intensity"
 
         dummies = pd.get_dummies(df_new["resp_device_group"], prefix="resp_device")
+        for _expected in ["resp_device_low_intensity", "resp_device_moderate_intensity",
+                          "resp_device_high_intensity", "resp_device_unknown"]:
+            if _expected not in dummies.columns:
+                dummies[_expected] = 0
         df_new = pd.concat([df_new, dummies], axis=1)
         return df_new
 

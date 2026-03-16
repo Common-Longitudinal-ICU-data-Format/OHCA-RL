@@ -5,367 +5,912 @@
 #     "pandas",
 #     "pyarrow",
 #     "numpy",
+#     "matplotlib",
+#     "seaborn",
 # ]
 # ///
 
 import marimo
 
 __generated_with = "0.20.4"
-app = marimo.App(width="medium", app_title="OHCA-RL Combined Dashboard")
+app = marimo.App(width="medium", app_title="OHCA-RL Multi-Site Dashboard")
 
 
-# ── Cell 0: Imports & Config ──────────────────────────────────────────
+# ── Cell 0: Imports & Site Discovery ──────────────────────────────────
 @app.cell
 def _():
     import marimo as mo
     import json
     import base64
+    import io
+    import os
     import pandas as pd
     import numpy as np
     from pathlib import Path
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     from utils import setup_logging
     logger = setup_logging("09_combined_dashboard")
 
     project_root = Path(__file__).parent.parent.resolve()
+    all_site_dir = project_root / "all_site_data"
+    output_dir = project_root / "output" / "final"
+    os.makedirs(output_dir, exist_ok=True)
 
-    with open(project_root / "config" / "config.json", "r") as _f:
-        config = json.load(_f)
+    # Auto-discover sites
+    site_names = sorted([
+        d.name for d in all_site_dir.iterdir()
+        if d.is_dir() and not d.name.startswith(".")
+    ])
 
-    site_name = config["site_name"]
-    intermediate_dir = project_root / "output" / "intermediate"
-    training_dir = intermediate_dir / "training"
-    final_dir = project_root / "output" / "final"
-    fig_dir = final_dir / "figures"
-    ext_val_dir = final_dir / "external_validation"
+    # Detect training site by presence of training_config.json
+    training_site = None
+    for _s in site_names:
+        if (all_site_dir / _s / "training_config.json").exists():
+            training_site = _s
+            break
 
-    mo.md(f"# OHCA-RL Combined Dashboard Generator\n**Site:** {site_name}")
+    SITE_COLORS = {
+        "ucmc": "#1565C0",
+        "rush": "#E53935",
+        "emory": "#43A047",
+        "nu": "#757575",
+    }
+    SITE_LABELS = {
+        "ucmc": "UCMC (Training)",
+        "rush": "Rush",
+        "emory": "Emory",
+        "nu": "NU",
+    }
+    ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
+    ACTION_COLORS = {
+        0: "#E53935",
+        1: "#42A5F5",
+        2: "#66BB6A",
+        3: "#F8BBD0",
+    }
+
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.size": 11,
+        "axes.titlesize": 13,
+        "axes.labelsize": 12,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "axes.grid": True,
+        "grid.alpha": 0.2,
+    })
+
+    logger.info("Discovered sites: %s (training=%s)", site_names, training_site)
+    mo.md(f"# Multi-Site Combined Dashboard\n**Sites:** {', '.join(site_names)}\n**Training site:** {training_site}")
     return (
-        base64,
-        config,
-        ext_val_dir,
-        fig_dir,
-        final_dir,
-        intermediate_dir,
-        json,
-        logger,
-        mo,
-        np,
-        pd,
-        project_root,
-        site_name,
-        training_dir,
+        ACTION_COLORS, ACTION_LABELS, SITE_COLORS, SITE_LABELS,
+        all_site_dir, base64, io, json, logger, mo, np, os, output_dir,
+        pd, plt, project_root, site_names, training_site,
     )
 
 
-# ── Cell 1: Load All Outputs ─────────────────────────────────────────
+# ── Cell 1: Load All Site Data ────────────────────────────────────────
 @app.cell
-def _(base64, ext_val_dir, fig_dir, final_dir, logger, mo, np, pd, training_dir):
+def _(all_site_dir, base64, json, logger, mo, pd, site_names):
     def fig_to_data_uri(path):
-        """Read an image file and return a base64 data URI."""
         if not path.exists():
             return None
-        _suffix = path.suffix.lower()
-        _mime = "image/png" if _suffix == ".png" else "image/jpeg" if _suffix in (".jpg", ".jpeg") else "image/svg+xml" if _suffix == ".svg" else "application/pdf"
         with open(path, "rb") as _f:
             _data = base64.b64encode(_f.read()).decode("utf-8")
-        return f"data:{_mime};base64,{_data}"
+        return f"data:image/png;base64,{_data}"
 
-    def read_html_table(path):
-        """Read an HTML file and extract just the content body."""
-        if not path.exists():
-            return "<p><em>Not available</em></p>"
-        with open(path, "r", encoding="utf-8") as _f:
-            _html = _f.read()
-        # Extract content between <div class="container"> and closing </div>
-        if '<div class="container">' in _html:
-            _start = _html.index('<div class="container">')
-            _end = _html.rindex("</div>")
-            return _html[_start:_end + 6]
-        return _html
+    def safe_read_csv(path):
+        if path.exists():
+            return pd.read_csv(path)
+        return None
 
-    def read_csv_as_html_table(path, max_rows=50):
-        """Read a CSV and render as styled HTML table."""
-        if not path.exists():
-            return "<p><em>Not available</em></p>"
-        _df = pd.read_csv(path)
-        if len(_df) > max_rows:
-            _df = _df.head(max_rows)
-        return _df.to_html(index=False, classes="data-table", border=0)
+    def safe_read_json(path):
+        if path.exists():
+            with open(path, "r") as _f:
+                return json.load(_f)
+        return None
 
-    # ── Collect all figures ──
-    _fig_names = [
-        "fig1_missingness_heatmap",
-        "fig2_vasopressor_nee",
-        "fig3_treatment_timelines",
-        "fig4_sofa_trajectory",
-        "fig5_vital_signs",
-        "fig6_action_distribution",
-        "fig7_labs",
-        "fig8_training_curves",
-        "fig9_action_distribution",
-        "fig10_patient_timelines",
-        "fig11_agreement_outcome",
-        "fig12_concordance_or",
-        "fig13_consort_updated",
-        "fig14_action_confusion_matrix",
+    site_data = {}
+    for _site in site_names:
+        _dir = all_site_dir / _site
+        _d = {}
+
+        # Root-level CSVs
+        for _key in ["table1_ohca_long", "table1_ohca_vaso_long",
+                      "strobe_counts", "action_distribution",
+                      "feature_summary", "missingness_comparison"]:
+            _d[_key] = safe_read_csv(_dir / f"{_key}.csv")
+
+        # Training-only files (UCMC)
+        for _key in ["training_history", "training_results_summary",
+                      "test_action_summary", "bin_summary", "coef_summary"]:
+            _d[_key] = safe_read_csv(_dir / f"{_key}.csv")
+        _d["training_config"] = safe_read_json(_dir / "training_config.json")
+
+        # External validation
+        _ext_dir = _dir / "external_validation"
+        _d["ext_val_metadata"] = safe_read_json(_ext_dir / "evaluation_metadata.json")
+        _d["ext_val_coef"] = safe_read_csv(_ext_dir / "coef_summary.csv")
+        _d["ext_val_bin"] = safe_read_csv(_ext_dir / "bin_summary.csv")
+        _d["ext_val_action"] = safe_read_csv(_ext_dir / "action_summary.csv")
+
+        # Figures (root)
+        _d["figures"] = {}
+        _fig_dir = _dir / "figures"
+        if _fig_dir.exists():
+            for _png in sorted(_fig_dir.glob("*.png")):
+                _d["figures"][_png.stem] = fig_to_data_uri(_png)
+
+        # External validation figures
+        _d["ext_val_figures"] = {}
+        _ext_fig_dir = _ext_dir / "figures"
+        if _ext_fig_dir.exists():
+            for _png in sorted(_ext_fig_dir.glob("*.png")):
+                _d["ext_val_figures"][_png.stem] = fig_to_data_uri(_png)
+
+        site_data[_site] = _d
+        _n_figs = sum(1 for v in _d["figures"].values() if v)
+        _n_ext_figs = sum(1 for v in _d["ext_val_figures"].values() if v)
+        logger.info("Loaded %s: %d figs, %d ext_val figs, ext_val=%s",
+                     _site, _n_figs, _n_ext_figs,
+                     "yes" if _d["ext_val_metadata"] else "no")
+
+    mo.md(f"Loaded data for **{len(site_data)}** sites: {', '.join(site_data.keys())}")
+    return (site_data, fig_to_data_uri, safe_read_csv, safe_read_json)
+
+
+# ── Cell 2: Generate Combined Figures ─────────────────────────────────
+@app.cell
+def _(
+    ACTION_COLORS, ACTION_LABELS, SITE_COLORS, SITE_LABELS,
+    all_site_dir, base64, io, logger, mo, np, pd, plt, site_data, site_names,
+):
+    def fig_to_base64(fig):
+        _buf = io.BytesIO()
+        fig.savefig(_buf, format="png", dpi=150, bbox_inches="tight")
+        _buf.seek(0)
+        _data = base64.b64encode(_buf.read()).decode("utf-8")
+        plt.close(fig)
+        return f"data:image/png;base64,{_data}"
+
+    # ── Fig A: Multi-Site Forest Plot (per-10pp OR) ──
+    _labels_a = []
+    _ors_a = []
+    _ci_lows_a = []
+    _ci_highs_a = []
+    _pvals_a = []
+    _colors_a = []
+
+    for _site in site_names:
+        _coef = site_data[_site].get("ext_val_coef")
+        if _coef is None or len(_coef) == 0:
+            continue
+        _row = _coef.iloc[0]
+        _labels_a.append(SITE_LABELS.get(_site, _site.upper()))
+        _ors_a.append(float(_row["or_10pp"]))
+        _ci_lows_a.append(float(_row["or_10pp_ci_low"]))
+        _ci_highs_a.append(float(_row["or_10pp_ci_high"]))
+        _pvals_a.append(float(_row["p_value"]))
+        _colors_a.append(SITE_COLORS.get(_site, "#666"))
+
+    _fig_a, _ax_a = plt.subplots(figsize=(10, max(3, len(_labels_a) * 1.5 + 1)))
+    _y_a = np.arange(len(_labels_a))
+    for _i, (_label, _o, _lo, _hi, _p, _c) in enumerate(
+            zip(_labels_a, _ors_a, _ci_lows_a, _ci_highs_a, _pvals_a, _colors_a)):
+        _ax_a.errorbar(_o, _i, xerr=[[_o - _lo], [_hi - _o]], fmt="D",
+                       color=_c, markersize=10, capsize=6, linewidth=2, capthick=2)
+        _pstr = "p < 0.001" if _p < 0.001 else f"p = {_p:.3f}"
+        _ax_a.text(_hi + 0.02, _i,
+                   f"  {_o:.2f} [{_lo:.2f}\u2013{_hi:.2f}], {_pstr}",
+                   va="center", fontsize=10)
+    _ax_a.axvline(1, color="grey", linestyle="--", linewidth=1, alpha=0.7)
+    _ax_a.set_yticks(_y_a)
+    _ax_a.set_yticklabels(_labels_a, fontsize=11)
+    _ax_a.set_xlabel("Odds Ratio per 10pp Agreement Increase")
+    _ax_a.set_title("Multi-Site Concordance: Agreement Rate \u2192 Better CPC Outcome",
+                     fontsize=13, fontweight="bold")
+    _ax_a.invert_yaxis()
+    _fig_a.tight_layout()
+    _forest_uri = fig_to_base64(_fig_a)
+
+    # ── Fig B: Combined Agreement-Outcome ──
+    _bin_labels = ["0-25%", "25-50%", "50-75%", "75-100%"]
+    _n_bins = len(_bin_labels)
+    _sites_with_bins = [s for s in site_names if site_data[s].get("ext_val_bin") is not None]
+    _n_sites_b = len(_sites_with_bins)
+
+    _fig_b, _ax_b = plt.subplots(figsize=(10, 6))
+    _width_b = 0.8 / max(_n_sites_b, 1)
+    _x_b = np.arange(_n_bins)
+
+    _site_idx_b = 0
+    for _site in _sites_with_bins:
+        _bins_df = site_data[_site]["ext_val_bin"]
+        _cpc_vals = _bins_df["mean_cpc_ord_good"].tolist()
+        _n_hosps = _bins_df["n_hosp"].tolist()
+        _offset = (_site_idx_b - (_n_sites_b - 1) / 2) * _width_b
+        _bars = _ax_b.bar(_x_b + _offset, _cpc_vals, _width_b,
+                          label=SITE_LABELS.get(_site, _site.upper()),
+                          color=SITE_COLORS.get(_site, "#666"),
+                          alpha=0.85, edgecolor="white")
+        for _bar, _n in zip(_bars, _n_hosps):
+            _ax_b.text(_bar.get_x() + _bar.get_width() / 2,
+                       _bar.get_height() + 0.02,
+                       f"n={_n}", ha="center", va="bottom", fontsize=7)
+        _site_idx_b += 1
+
+    _ax_b.set_xticks(_x_b)
+    _ax_b.set_xticklabels(_bin_labels)
+    _ax_b.set_xlabel("RL-Clinician Agreement Rate")
+    _ax_b.set_ylabel("Mean CPC Ordinal Score (higher = better)")
+    _ax_b.set_title("Agreement-Outcome Relationship Across Sites",
+                     fontsize=13, fontweight="bold")
+    _ax_b.legend(frameon=True, fontsize=10)
+    _ax_b.set_ylim(0)
+    _fig_b.tight_layout()
+    _agreement_uri = fig_to_base64(_fig_b)
+
+    # ── Fig C: Combined Action Distribution (1x3 subplots) ──
+    _sites_with_actions = [s for s in site_names
+                           if site_data[s].get("ext_val_action") is not None]
+    _n_c = len(_sites_with_actions)
+
+    _fig_c, _axes_c = plt.subplots(1, _n_c, figsize=(5 * _n_c, 5), sharey=True)
+    if _n_c == 1:
+        _axes_c = [_axes_c]
+
+    for _idx, _site in enumerate(_sites_with_actions):
+        _ax = _axes_c[_idx]
+        _adf = site_data[_site]["ext_val_action"]
+        _total_pred = _adf["pred_count"].sum()
+        _total_obs = _adf["obs_count"].sum()
+        _actions = sorted(_adf.index.tolist())
+        _pred_pcts = [(_adf.loc[a, "pred_count"] / _total_pred * 100) for a in _actions]
+        _obs_pcts = [(_adf.loc[a, "obs_count"] / _total_obs * 100) for a in _actions]
+        _x_c = np.arange(4)
+        _w_c = 0.6
+        _colors_c = [ACTION_COLORS[a] for a in _actions]
+        _act_labels = [ACTION_LABELS[a] for a in _actions]
+
+        _ax.bar(_x_c, _pred_pcts, _w_c, color=_colors_c, alpha=0.9, edgecolor="white")
+        _ax.bar(_x_c, [-p for p in _obs_pcts], _w_c, color=_colors_c, alpha=0.5, edgecolor="white")
+
+        for _j, _pct in enumerate(_pred_pcts):
+            _ax.text(_j, _pct + 0.5, f"{_pct:.1f}%", ha="center", fontsize=8, fontweight="bold")
+        for _j, _pct in enumerate(_obs_pcts):
+            _ax.text(_j, -_pct - 0.5, f"{_pct:.1f}%", ha="center", va="top", fontsize=8, fontweight="bold")
+
+        _ax.axhline(0, color="black", linewidth=1)
+        _ax.set_xticks(_x_c)
+        _ax.set_xticklabels(_act_labels, fontsize=9)
+        _ax.set_title(SITE_LABELS.get(_site, _site.upper()), fontsize=11, fontweight="bold")
+
+        _max_pct = max(max(_pred_pcts), max(_obs_pcts)) * 1.3
+        _ax.set_ylim(-_max_pct, _max_pct)
+        _yticks = _ax.get_yticks()
+        _ax.set_yticks(_yticks)
+        _ax.set_yticklabels([f"{abs(y):.0f}" for y in _yticks])
+
+        if _idx == 0:
+            _ax.set_ylabel("Percent (%)")
+
+    _fig_c.text(0.02, 0.85, "RL Agent", fontsize=12, fontweight="bold", color="#333")
+    _fig_c.text(0.02, 0.15, "Clinicians", fontsize=12, fontweight="bold", color="#333")
+    _fig_c.suptitle("Vasopressor Action Distribution: RL Agent vs Clinician",
+                     fontsize=13, fontweight="bold", y=1.02)
+    _fig_c.tight_layout()
+    _action_dist_uri = fig_to_base64(_fig_c)
+
+    # ── Fig D & E: Combined Missingness Heatmaps (Before & After) ──
+    import seaborn as sns
+
+    def _var_group(v):
+        if v.startswith("vital_"):
+            return "Vitals"
+        elif v.startswith("lab_"):
+            return "Labs"
+        elif v.startswith("med_cont_") or v.startswith("med_int_"):
+            return "Meds"
+        elif v.startswith("resp_"):
+            return "Resp"
+        else:
+            return "Other"
+
+    # Collect missingness data from all sites
+    _miss_frames_before = []
+    _miss_frames_after = []
+    for _site in site_names:
+        _mc = site_data[_site].get("missingness_comparison")
+        if _mc is None:
+            continue
+        _mc = _mc.copy()
+        _miss_frames_before.append(
+            _mc[["variable", "patient_missing_pct_before"]].rename(
+                columns={"patient_missing_pct_before": _site}
+            )
+        )
+        _miss_frames_after.append(
+            _mc[["variable", "patient_missing_pct_after"]].rename(
+                columns={"patient_missing_pct_after": _site}
+            )
+        )
+
+    _miss_before_uri = None
+    _miss_after_uri = None
+
+    if _miss_frames_before:
+        # Merge all sites on variable name
+        from functools import reduce
+        _before_merged = reduce(lambda l, r: pd.merge(l, r, on="variable", how="outer"),
+                                _miss_frames_before).fillna(0)
+        _after_merged = reduce(lambda l, r: pd.merge(l, r, on="variable", how="outer"),
+                               _miss_frames_after).fillna(0)
+
+        # Add group for sorting, filter to non-zero missingness
+        _before_merged["group"] = _before_merged["variable"].apply(_var_group)
+        _after_merged["group"] = _after_merged["variable"].apply(_var_group)
+
+        _site_cols = [s for s in site_names if s in _before_merged.columns]
+
+        # Before: keep rows where any site has >0 missingness
+        _mask_before = _before_merged[_site_cols].max(axis=1) > 0
+        _before_plot = _before_merged[_mask_before].sort_values(["group", "variable"]).copy()
+
+        # After: keep rows where any site has >0 missingness
+        _mask_after = _after_merged[_site_cols].max(axis=1) > 0
+        _after_plot = _after_merged[_mask_after].sort_values(["group", "variable"]).copy()
+
+        # Helper to build a multi-site missingness heatmap
+        def _build_missingness_heatmap(plot_df, title):
+            _vars = plot_df["variable"].tolist()
+            _groups = plot_df["group"].tolist()
+            _data = plot_df[_site_cols].values  # rows=variables, cols=sites
+            _site_labels = [SITE_LABELS.get(s, s.upper()) for s in _site_cols]
+
+            _fig, _ax = plt.subplots(figsize=(max(5, len(_site_cols) * 2.5), max(5, len(_vars) * 0.32)))
+            _im = _ax.imshow(_data, cmap="Reds", aspect="auto", vmin=0, vmax=100)
+
+            # Annotate cells
+            for _i in range(len(_vars)):
+                for _j in range(len(_site_cols)):
+                    _val = _data[_i, _j]
+                    _color = "white" if _val > 60 else "black"
+                    _ax.text(_j, _i, f"{_val:.0f}", ha="center", va="center",
+                             fontsize=8, color=_color, fontweight="bold" if _val > 0 else "normal")
+
+            _ax.set_xticks(range(len(_site_labels)))
+            _ax.set_xticklabels(_site_labels, fontsize=10, fontweight="bold")
+            _ax.xaxis.set_ticks_position("top")
+            _ax.xaxis.set_label_position("top")
+            _ax.set_yticks(range(len(_vars)))
+            _ax.set_yticklabels(_vars, fontsize=8)
+
+            # Group separators
+            _prev = None
+            for _i, _g in enumerate(_groups):
+                if _prev is not None and _g != _prev:
+                    _ax.axhline(_i - 0.5, color="black", linewidth=1.5)
+                _prev = _g
+
+            _cbar = _fig.colorbar(_im, ax=_ax, shrink=0.7, pad=0.02)
+            _cbar.set_label("Patient-Level Missingness (%)", fontsize=9)
+            _ax.set_title(title, fontsize=13, fontweight="bold", pad=20)
+            _fig.tight_layout()
+            return _fig
+
+        if len(_before_plot) > 0:
+            _fig_d = _build_missingness_heatmap(
+                _before_plot, "Patient-Level Missingness Before Imputation"
+            )
+            _miss_before_uri = fig_to_base64(_fig_d)
+
+        if len(_after_plot) > 0:
+            _fig_e = _build_missingness_heatmap(
+                _after_plot, "Patient-Level Missingness After Imputation"
+            )
+            _miss_after_uri = fig_to_base64(_fig_e)
+
+    # ── Fig F: Cross-Site Clinical Trajectories (hourly) ──
+    # Each panel: median line per site with IQR ribbon (continuous) or proportion (binary)
+    _traj_panels = [
+        # (csv_file, variable_filter, y_col, title, ylabel, is_proportion)
+        ("fig5_vital_signs.csv", "vital_heart_rate", "median", "Heart Rate", "bpm", False),
+        ("fig5_vital_signs.csv", "vital_map", "median", "MAP", "mmHg", False),
+        ("fig7_labs.csv", "lab_lactate", "median", "Lactate", "mmol/L", False),
+        ("fig2_vasopressor_nee.csv", "med_cont_nee", "median", "NEE Dose (patients on vaso)", "mcg/kg/min", False),
+        ("fig3_treatment_timelines.csv", "on_vaso", "proportion", "On Vasopressors", "%", True),
+        ("fig3_treatment_timelines.csv", "on_imv", "proportion", "On Mechanical Ventilation", "%", True),
     ]
 
-    figures = {}
-    for _name in _fig_names:
-        _png = fig_dir / f"{_name}.png"
-        if _png.exists():
-            figures[_name] = fig_to_data_uri(_png)
-            logger.info("Loaded figure: %s", _name)
-        else:
-            figures[_name] = None
-            logger.warning("Missing figure: %s", _name)
+    _fig_f, _axes_f = plt.subplots(3, 2, figsize=(14, 12))
+    _axes_flat = _axes_f.flatten()
 
-    # ── Load HTML tables ──
-    table1_full_html = read_html_table(final_dir / "table1_ohca.html")
-    table1_vaso_html = read_html_table(final_dir / "table1_ohca_vaso.html")
+    for _p_idx, (_csv, _var, _ycol, _title, _ylabel, _is_pct) in enumerate(_traj_panels):
+        _ax = _axes_flat[_p_idx]
+        for _site in site_names:
+            _csv_path = all_site_dir / _site / "figures" / _csv
+            if not _csv_path.exists():
+                continue
+            _df = pd.read_csv(_csv_path)
+            _df = _df[(_df["group"] == "overall") & (_df["variable"] == _var)].copy()
+            if len(_df) == 0:
+                continue
+            _df = _df.sort_values("time_bucket")
+            _x = _df["time_bucket"].values
+            _y = _df[_ycol].astype(float).values
+            if _is_pct:
+                _y = _y * 100  # proportion → %
 
-    # ── Load training data ──
-    history_html = read_csv_as_html_table(training_dir / "training_history.csv")
-    action_summary_html = read_csv_as_html_table(training_dir / "test_action_summary.csv")
-    coef_html = read_csv_as_html_table(training_dir / "coef_summary.csv")
-    bin_html = read_csv_as_html_table(training_dir / "bin_summary.csv")
+            _color = SITE_COLORS.get(_site, "#666")
+            _label = SITE_LABELS.get(_site, _site.upper())
+            _ax.plot(_x, _y, color=_color, label=_label, linewidth=1.5, alpha=0.85)
 
-    # ── Load STROBE counts ──
-    strobe_html = read_csv_as_html_table(final_dir / "strobe_counts.csv")
+            # IQR ribbon for continuous variables
+            if not _is_pct and "q25" in _df.columns and "q75" in _df.columns:
+                _q25 = pd.to_numeric(_df["q25"], errors="coerce").values
+                _q75 = pd.to_numeric(_df["q75"], errors="coerce").values
+                _valid = ~(np.isnan(_q25) | np.isnan(_q75))
+                if _valid.any():
+                    _ax.fill_between(_x[_valid], _q25[_valid], _q75[_valid],
+                                     color=_color, alpha=0.10)
 
-    # ── Load training results summary ──
-    results_summary_html = read_csv_as_html_table(final_dir / "training_results_summary.csv")
+        _ax.set_title(_title, fontsize=11, fontweight="bold")
+        _ax.set_ylabel(_ylabel, fontsize=9)
+        _ax.spines["top"].set_visible(False)
+        _ax.spines["right"].set_visible(False)
+        if _p_idx >= 4:  # bottom row
+            _ax.set_xlabel("Hours from ICU Admission", fontsize=9)
 
-    # ── External validation ──
-    has_ext_val = ext_val_dir.exists() and (ext_val_dir / "evaluation_metadata.json").exists()
-    if has_ext_val:
-        with open(ext_val_dir / "evaluation_metadata.json") as _f:
-            import json as _json
-            ext_meta = _json.load(_f)
-        ext_action_html = read_csv_as_html_table(ext_val_dir / "action_summary.csv")
-        ext_coef_html = read_csv_as_html_table(ext_val_dir / "coef_summary.csv")
-        ext_bin_html = read_csv_as_html_table(ext_val_dir / "bin_summary.csv")
-    else:
-        ext_meta = {}
-        ext_action_html = ""
-        ext_coef_html = ""
-        ext_bin_html = ""
+    # Single shared legend from first panel
+    _handles, _labels_leg = _axes_flat[0].get_legend_handles_labels()
+    _fig_f.legend(_handles, _labels_leg, loc="upper center", ncol=len(site_names),
+                  fontsize=10, frameon=True, bbox_to_anchor=(0.5, 1.02))
 
-    _n_loaded = sum(1 for v in figures.values() if v is not None)
-    mo.md(f"Loaded **{_n_loaded}/{len(_fig_names)}** figures, tables, and training data.")
-    return (
-        action_summary_html,
-        bin_html,
-        coef_html,
-        ext_action_html,
-        ext_bin_html,
-        ext_coef_html,
-        ext_meta,
-        fig_to_data_uri,
-        figures,
-        has_ext_val,
-        history_html,
-        results_summary_html,
-        strobe_html,
-        table1_full_html,
-        table1_vaso_html,
-    )
+    _fig_f.suptitle("Clinical Trajectories Across Sites (Overall Cohort)",
+                     fontsize=14, fontweight="bold", y=1.05)
+    _fig_f.tight_layout(rect=[0, 0, 1, 0.98])
+    _clinical_dist_uri = fig_to_base64(_fig_f)
+
+    combined_figures = {
+        "forest_plot": _forest_uri,
+        "agreement_outcome": _agreement_uri,
+        "action_distribution": _action_dist_uri,
+        "missingness_before": _miss_before_uri,
+        "missingness_after": _miss_after_uri,
+        "clinical_distributions": _clinical_dist_uri,
+    }
+
+    logger.info("Generated %d combined figures", len([v for v in combined_figures.values() if v]))
+    mo.md(f"Generated **{len([v for v in combined_figures.values() if v])}** combined comparison figures")
+    return (combined_figures, fig_to_base64)
 
 
-# ── Cell 2: Build HTML Sections ───────────────────────────────────────
+# ── Cell 3: Build Combined Overview HTML ──────────────────────────────
 @app.cell
-def _(action_summary_html, bin_html, coef_html, ext_action_html, ext_bin_html, ext_coef_html, ext_meta, figures, has_ext_val, history_html, logger, results_summary_html, site_name, strobe_html, table1_full_html, table1_vaso_html):
-    def _img_tag(fig_name, alt="", width="100%"):
-        _uri = figures.get(fig_name)
-        if _uri:
-            return f'<img src="{_uri}" alt="{alt}" style="max-width:{width}; height:auto; margin: 10px 0;">'
-        return f'<p class="missing"><em>Figure not available: {fig_name}</em></p>'
+def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site, SITE_LABELS):
+    # ── Summary Statistics Table ──
+    _summary_rows = []
+    for _site in site_names:
+        _strobe = site_data[_site].get("strobe_counts")
+        _meta = site_data[_site].get("ext_val_metadata") or {}
+        _coef = site_data[_site].get("ext_val_coef")
+        _role = "Training" if _site == training_site else "Validation"
 
-    # ── Section 1: Overview ──
+        def _get_strobe(counter):
+            if _strobe is None:
+                return "N/A"
+            _match = _strobe[_strobe["counter"] == counter]
+            return f"{int(_match.iloc[0]['value']):,}" if len(_match) > 0 else "N/A"
+
+        def _get_strobe_pct(counter):
+            if _strobe is None:
+                return "N/A"
+            _match = _strobe[_strobe["counter"] == counter]
+            return f"{_match.iloc[0]['value']:.1f}%" if len(_match) > 0 else "N/A"
+
+        _n_icu = _get_strobe("4_icu_admitted_patients")
+        _n_vaso = _get_strobe("5_vaso_patients")
+        _mort = _get_strobe_pct("5_vaso_mortality_pct")
+        _n_trans = f"{_meta.get('n_transitions', 0):,}" if _meta else "N/A"
+        _agree = f"{_meta.get('overall_agreement', 0):.1%}" if _meta else "N/A"
+
+        # OR per 10pp from coef_summary
+        if _coef is not None and len(_coef) > 0:
+            _r = _coef.iloc[0]
+            _or_str = f"{_r['or_10pp']:.2f} [{_r['or_10pp_ci_low']:.2f}\u2013{_r['or_10pp_ci_high']:.2f}]"
+            _p = float(_r["p_value"])
+            _p_str = "< 0.001" if _p < 0.001 else f"{_p:.3f}"
+        else:
+            _or_str = "N/A"
+            _p_str = "N/A"
+
+        _summary_rows.append(f"""<tr>
+            <td><strong>{SITE_LABELS.get(_site, _site.upper())}</strong></td>
+            <td>{_role}</td>
+            <td>{_n_icu}</td>
+            <td>{_n_vaso}</td>
+            <td>{_mort}</td>
+            <td>{_n_trans}</td>
+            <td>{_agree}</td>
+            <td>{_or_str}</td>
+            <td>{_p_str}</td>
+        </tr>""")
+
+    _summary_table = f"""
+    <table class="data-table">
+        <tr>
+            <th>Site</th><th>Role</th><th>N ICU</th><th>N Vaso</th>
+            <th>Mortality</th><th>Patient-Hours</th><th>Agreement</th>
+            <th>OR per 10pp [95% CI]</th><th>p-value</th>
+        </tr>
+        {"".join(_summary_rows)}
+    </table>"""
+
+    # ── CONSORT Flow Table ──
+    _consort_counters = [
+        ("1_all_cardiac_arrest_patients", "All cardiac arrest patients"),
+        ("2_ohca_patients", "OHCA patients (present on admission)"),
+        ("3_first_encounter_patients", "First encounter per patient"),
+        ("4_icu_admitted_patients", "ICU admitted"),
+        ("5_vaso_patients", "Vasopressor patients (study cohort)"),
+    ]
+
+    _consort_rows = []
+    for _counter, _label in _consort_counters:
+        _row = [f"<td>{_label}</td>"]
+        _total = 0
+        for _site in site_names:
+            _strobe = site_data[_site].get("strobe_counts")
+            if _strobe is not None:
+                _match = _strobe[_strobe["counter"] == _counter]
+                _val = int(_match.iloc[0]["value"]) if len(_match) > 0 else 0
+            else:
+                _val = 0
+            _row.append(f"<td>{_val:,}</td>")
+            _total += _val
+        _row.append(f"<td><strong>{_total:,}</strong></td>")
+        _consort_rows.append("<tr>" + "".join(_row) + "</tr>")
+
+    _consort_header = "<tr><th>Cohort Step</th>" + "".join(
+        f"<th>{SITE_LABELS.get(_s, _s.upper())}</th>" for _s in site_names) + "<th>Total</th></tr>"
+    _consort_table = f'<table class="data-table">{_consort_header}{"".join(_consort_rows)}</table>'
+
+    # ── CPC Distribution Table ──
+    _cpc_levels = ["CPC1_2", "CPC3", "CPC4", "CPC5"]
+    _cpc_labels = {
+        "CPC1_2": "CPC 1-2 (Good neurological outcome)",
+        "CPC3": "CPC 3 (Severe disability)",
+        "CPC4": "CPC 4 (Vegetative state)",
+        "CPC5": "CPC 5 (Dead)",
+    }
+
+    _cpc_rows = []
+    for _cpc in _cpc_levels:
+        _row = [f"<td>{_cpc_labels[_cpc]}</td>"]
+        _total_n = 0
+        _total_denom = 0
+        for _site in site_names:
+            _t1 = site_data[_site].get("table1_ohca_vaso_long")
+            if _t1 is not None:
+                _match = _t1[
+                    (_t1["subgroup"] == "Overall") &
+                    (_t1["variable"].str.strip() == "CPC") &
+                    (_t1["level"].fillna("").astype(str).str.strip() == _cpc)
+                ]
+                if len(_match) > 0:
+                    _n = int(_match.iloc[0]["n"])
+                    _tot = int(_match.iloc[0]["total"])
+                    _pct = _n / _tot * 100 if _tot > 0 else 0
+                    _row.append(f"<td>{_n} ({_pct:.1f}%)</td>")
+                    _total_n += _n
+                    _total_denom += _tot
+                else:
+                    _row.append("<td>N/A</td>")
+            else:
+                _row.append("<td>N/A</td>")
+        _total_pct = _total_n / _total_denom * 100 if _total_denom > 0 else 0
+        _row.append(f"<td><strong>{_total_n} ({_total_pct:.1f}%)</strong></td>")
+        _cpc_rows.append("<tr>" + "".join(_row) + "</tr>")
+
+    _cpc_header = "<tr><th>CPC Category</th>" + "".join(
+        f"<th>{SITE_LABELS.get(_s, _s.upper())}</th>" for _s in site_names) + "<th>Total</th></tr>"
+    _cpc_table = f'<table class="data-table">{_cpc_header}{"".join(_cpc_rows)}</table>'
+
+    # ── Combined Table 1 (side-by-side) ──
+    # Variables to exclude from Table 1
+    _t1_exclude_vars = {
+        "Minimum GCS (over stay)",
+        "Median RASS",
+    }
+
+    # Categorical levels to exclude per variable (keep only common categories)
+    _t1_exclude_levels = {
+        "Race": {"american indian or alaska native", "native hawaiian or other pacific islander", "other", "unknown"},
+        "Ethnicity": {"unknown"},
+    }
+
+    def _format_stat(row):
+        _st = str(row.get("stat_type", "")).strip()
+        if _st == "count":
+            return str(int(row["n"]))
+        elif _st == "continuous":
+            return f"{row['median']:.1f} [{row['q25']:.1f}, {row['q75']:.1f}]"
+        elif _st in ("categorical", "binary"):
+            _pct = row["n"] / row["total"] * 100 if row["total"] > 0 else 0
+            return f"{int(row['n'])} ({_pct:.1f}%)"
+        return str(row.get("n", ""))
+
+    def _make_display_label(row):
+        """For binary rows (yes/no), show the variable name directly.
+           For categorical levels, indent them under the parent variable."""
+        _var = str(row["variable"]).strip()
+        _level = str(row.get("level", "")).strip() if pd.notna(row.get("level")) else ""
+        _stype = str(row.get("stat_type", "")).strip()
+        if _stype == "binary":
+            # Show variable name (e.g., "Ever CRRT, n (%)") — not the "yes" level
+            return _var
+        elif _level:
+            return f"&nbsp;&nbsp;{_level}"
+        else:
+            return _var
+
+    _all_t1_rows = []
+    for _site in site_names:
+        _df = site_data[_site].get("table1_ohca_vaso_long")
+        if _df is None:
+            continue
+        _overall = _df[_df["subgroup"] == "Overall"].copy()
+        # Filter out excluded variables
+        _overall = _overall[~_overall["variable"].str.strip().isin(_t1_exclude_vars)]
+        # Filter out excluded categorical levels
+        _overall = _overall[~_overall.apply(
+            lambda r: str(r.get("level", "")).strip().lower()
+            in _t1_exclude_levels.get(str(r["variable"]).strip(), set()),
+            axis=1,
+        )]
+        _overall["display"] = _overall.apply(_format_stat, axis=1)
+        _overall["display_label"] = _overall.apply(_make_display_label, axis=1)
+        _overall["variable_clean"] = _overall["variable"].str.strip()
+        _overall["level_clean"] = _overall["level"].fillna("").astype(str).str.strip()
+        _overall["site_key"] = _site
+        _all_t1_rows.append(_overall[["variable_clean", "level_clean", "display_label", "display", "site_key"]])
+
+    if _all_t1_rows:
+        _combined_t1 = pd.concat(_all_t1_rows, ignore_index=True)
+        _pivot = _combined_t1.pivot_table(
+            index=["variable_clean", "level_clean", "display_label"],
+            columns="site_key",
+            values="display",
+            aggfunc="first"
+        ).reset_index()
+
+        # Preserve original row order from first site with data
+        _first_site_with_data = next(
+            (s for s in site_names if site_data[s].get("table1_ohca_vaso_long") is not None), None
+        )
+        if _first_site_with_data is not None:
+            _first_df = site_data[_first_site_with_data]["table1_ohca_vaso_long"]
+            _order = _first_df[_first_df["subgroup"] == "Overall"][["variable", "level"]].copy()
+            _order = _order[~_order["variable"].str.strip().isin(_t1_exclude_vars)]
+            _order = _order[~_order.apply(
+                lambda r: str(r.get("level", "")).strip().lower()
+                in _t1_exclude_levels.get(str(r["variable"]).strip(), set()),
+                axis=1,
+            )]
+            _order["variable_clean"] = _order["variable"].str.strip()
+            _order["level_clean"] = _order["level"].fillna("").astype(str).str.strip()
+            _order = _order.drop_duplicates(subset=["variable_clean", "level_clean"])
+            _order["sort_key"] = range(len(_order))
+            _pivot = _pivot.merge(_order[["variable_clean", "level_clean", "sort_key"]],
+                                  on=["variable_clean", "level_clean"], how="left")
+            _pivot = _pivot.sort_values("sort_key").drop(columns=["sort_key"])
+
+        _t1_header = "<tr><th>Variable</th>" + "".join(
+            f"<th>{SITE_LABELS.get(s, s.upper())}</th>" for s in site_names) + "</tr>"
+        _t1_body = []
+        for _, _row in _pivot.iterrows():
+            _cells = f"<td>{_row['display_label']}</td>"
+            for _site in site_names:
+                _val = _row.get(_site, "N/A")
+                _cells += f"<td>{_val if pd.notna(_val) else 'N/A'}</td>"
+            _t1_body.append(f"<tr>{_cells}</tr>")
+        _table1_html = f'<table class="data-table">{_t1_header}{"".join(_t1_body)}</table>'
+    else:
+        _table1_html = "<p><em>Table 1 data not available</em></p>"
+
+    # ── Helper for figure embedding ──
+    def _img(uri, alt="", width="100%"):
+        if uri:
+            return f'<img src="{uri}" alt="{alt}" style="max-width:{width}; height:auto; margin: 10px 0;">'
+        return f'<p class="missing"><em>Figure not available: {alt}</em></p>'
+
+    # ── Assemble Overview HTML ──
     overview_html = f"""
     <div class="section">
         <h2>Study Overview</h2>
-        <p>Out-of-Hospital Cardiac Arrest (OHCA) Reinforcement Learning study. A Double Deep Q-Network (DDQN)
-        was trained to recommend vasopressor management actions for OHCA patients admitted to the ICU.</p>
-
-        <h3>CONSORT Flow Diagram</h3>
-        {_img_tag("fig13_consort_updated", "CONSORT Flow Diagram", "80%")}
-
-        <h3>Key Results</h3>
-        {results_summary_html}
-
-        <h3>STROBE Counts</h3>
-        {strobe_html}
+        {_summary_table}
     </div>
-    """
 
-    # ── Section 2: Table One ──
-    table1_html = f"""
     <div class="section">
-        <h2>Baseline Characteristics</h2>
-
-        <h3>Full OHCA Cohort</h3>
-        {table1_full_html}
-
-        <hr style="margin: 40px 0;">
-
-        <h3>Vasopressor Cohort (Training Population)</h3>
-        {table1_vaso_html}
+        <h2>Cohort Flow</h2>
+        {_consort_table}
     </div>
-    """
 
-    # ── Section 3: Pre-Training Figures ──
-    pretraining_html = f"""
     <div class="section">
-        <h2>Pre-Training Figures</h2>
-
-        <h3>Figure 1: Missingness Heatmap</h3>
-        {_img_tag("fig1_missingness_heatmap", "Missingness Heatmap")}
-
-        <h3>Figure 2: Vasopressor/NEE Temporal</h3>
-        {_img_tag("fig2_vasopressor_nee", "Vasopressor/NEE")}
-
-        <h3>Figure 3: Treatment Timelines</h3>
-        {_img_tag("fig3_treatment_timelines", "Treatment Timelines")}
-
-        <h3>Figure 4: SOFA Trajectory</h3>
-        {_img_tag("fig4_sofa_trajectory", "SOFA Trajectory")}
-
-        <h3>Figure 5: Vital Signs</h3>
-        {_img_tag("fig5_vital_signs", "Vital Signs")}
-
-        <h3>Figure 6: Clinician Action Distribution Over Time</h3>
-        {_img_tag("fig6_action_distribution", "Action Distribution")}
-
-        <h3>Figure 7: Lab Trajectories</h3>
-        {_img_tag("fig7_labs", "Lab Trajectories")}
+        <h2>CPC Distribution (Vasopressor Cohort)</h2>
+        {_cpc_table}
     </div>
-    """
 
-    # ── Section 4: Training Results ──
-    training_html = f"""
     <div class="section">
-        <h2>Training Results</h2>
-
-        <h3>Figure 8: Training Loss Curves</h3>
-        {_img_tag("fig8_training_curves", "Training Curves")}
-
-        <h3>Training History</h3>
-        {history_html}
-
-        <h3>Figure 9: Action Distribution (RL Agent vs Clinician)</h3>
-        {_img_tag("fig9_action_distribution", "Action Distribution Comparison")}
-
-        <h3>Action Summary</h3>
-        {action_summary_html}
+        <h2>Baseline Characteristics (Vasopressor Cohort)</h2>
+        {_table1_html}
     </div>
-    """
 
-    # ── Section 5: Evaluation ──
-    evaluation_html = f"""
     <div class="section">
-        <h2>Model Evaluation</h2>
+        <h2>Clinical Trajectories</h2>
+        {_img(combined_figures.get("clinical_distributions"), "Clinical Trajectories", "100%")}
+    </div>
 
-        <h3>Figure 10: Patient Timeline Heatmaps</h3>
-        {_img_tag("fig10_patient_timelines", "Patient Timelines")}
+    <div class="section">
+        <h2>Multi-Site Concordance</h2>
 
-        <h3>Figure 14: Action Confusion Matrix</h3>
-        {_img_tag("fig14_action_confusion_matrix", "Action Confusion Matrix")}
+        <h3>Concordance OR Forest Plot (per 10pp Agreement Increase)</h3>
+        {_img(combined_figures.get("forest_plot"), "Multi-Site Forest Plot", "90%")}
 
-        <h3>Figure 11: Agreement-Outcome Relationship</h3>
-        {_img_tag("fig11_agreement_outcome", "Agreement-Outcome")}
+        <h3>Agreement-Outcome Relationship</h3>
+        {_img(combined_figures.get("agreement_outcome"), "Agreement-Outcome", "90%")}
 
-        <h3>Agreement Bins</h3>
-        {bin_html}
+        <h3>Action Distribution Comparison</h3>
+        {_img(combined_figures.get("action_distribution"), "Action Distribution", "100%")}
+    </div>
 
-        <h3>Figure 12: Concordance OR Forest Plot</h3>
-        {_img_tag("fig12_concordance_or", "Concordance OR")}
+    <div class="section">
+        <h2>Supplemental: Data Missingness</h2>
+        <p>Patient-level missingness (%) across sites, before and after forward-fill imputation.
+        Values represent the percentage of patients with <strong>no data</strong> for that variable across all time buckets.</p>
 
-        <h3>Ordinal Logistic Regression</h3>
-        {coef_html}
+        <h3>Before Imputation</h3>
+        {_img(combined_figures.get("missingness_before"), "Missingness Before Imputation", "90%")}
+
+        <h3>After Imputation</h3>
+        {_img(combined_figures.get("missingness_after"), "Missingness After Imputation", "90%")}
     </div>
     """
 
-    # ── Section 6: External Validation ──
-    if has_ext_val:
-        _ext_agreement = ext_meta.get("overall_agreement", "N/A")
-        _ext_or = ext_meta.get("ordinal_or", "N/A")
-        _ext_n = ext_meta.get("n_patients", "N/A")
-        _ext_site = ext_meta.get("local_site", "Unknown")
-        _ext_train_site = ext_meta.get("training_site", "Unknown")
-
-        external_html = f"""
-        <div class="section">
-            <h2>External Validation</h2>
-            <p>Training site: <strong>{_ext_train_site}</strong> | Validation site: <strong>{_ext_site}</strong></p>
-
-            <table class="data-table">
-                <tr><th>Metric</th><th>Value</th></tr>
-                <tr><td>N patients</td><td>{_ext_n}</td></tr>
-                <tr><td>Overall Agreement</td><td>{_ext_agreement:.1%}</td></tr>
-                <tr><td>Concordance OR</td><td>{_ext_or:.1f}</td></tr>
-            </table>
-
-            <h3>Action Summary</h3>
-            {ext_action_html}
-
-            <h3>Agreement Bins</h3>
-            {ext_bin_html}
-
-            <h3>Ordinal Logistic Regression</h3>
-            {ext_coef_html}
-        </div>
-        """
-    else:
-        external_html = """
-        <div class="section">
-            <h2>External Validation</h2>
-            <p><em>No external validation results available. Run <code>07_external_validation.py</code>
-            with shared model artifacts to generate these results.</em></p>
-        </div>
-        """
-
-    logger.info("Built all HTML sections")
-    return (
-        evaluation_html,
-        external_html,
-        overview_html,
-        pretraining_html,
-        table1_html,
-        training_html,
-    )
+    logger.info("Built combined overview HTML")
+    mo.md("Built **Combined Overview** tab content")
+    return (overview_html,)
 
 
-# ── Cell 3: Assemble Dashboard HTML ───────────────────────────────────
+# ── Cell 4: Build Per-Site HTML Sections ──────────────────────────────
 @app.cell
-def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining_html, site_name, table1_html, training_html):
-    _tabs = [
-        ("overview", "Overview", overview_html),
-        ("table1", "Table One", table1_html),
-        ("pretraining", "Pre-Training", pretraining_html),
-        ("training", "Training", training_html),
-        ("evaluation", "Evaluation", evaluation_html),
-        ("external", "External Validation", external_html),
+def _(logger, mo, pd, site_data, site_names, training_site, SITE_LABELS):
+    def _img_tag(data_uri, alt="", width="100%"):
+        if data_uri:
+            return f'<img src="{data_uri}" alt="{alt}" style="max-width:{width}; height:auto; margin: 10px 0;">'
+        return f'<p class="missing"><em>Figure not available: {alt}</em></p>'
+
+    def _csv_to_html(df, max_rows=50):
+        if df is None or len(df) == 0:
+            return "<p><em>Not available</em></p>"
+        if len(df) > max_rows:
+            df = df.head(max_rows)
+        return df.to_html(index=False, classes="data-table", border=0)
+
+    _pretraining_figs = [
+        ("fig1_missingness_heatmap", "Missingness Heatmap"),
+        ("fig2_vasopressor_nee", "Vasopressor/NEE Temporal"),
+        ("fig3_treatment_timelines", "Treatment Timelines"),
+        ("fig4_sofa_trajectory", "SOFA Trajectory"),
+        ("fig5_vital_signs", "Vital Signs"),
+        ("fig6_action_distribution", "Clinician Action Distribution"),
+        ("fig7_labs", "Lab Trajectories"),
     ]
 
+    _ext_val_figs = [
+        ("fig_patient_timelines", "Patient Timelines (RL vs Clinician)"),
+        ("fig_action_distribution", "Action Distribution (RL vs Clinician)"),
+        ("fig_action_confusion_matrix", "Action Confusion Matrix"),
+        ("fig_agreement_outcome", "Agreement-Outcome Relationship"),
+        ("fig_concordance_or", "Concordance OR"),
+    ]
+
+    per_site_html = {}
+    for _site in site_names:
+        _d = site_data[_site]
+        _sections = []
+
+        # ── Pre-Training Figures ──
+        _pre = '<div class="section"><h2>Pre-Training Figures</h2>'
+        for _fig_name, _title in _pretraining_figs:
+            _uri = _d["figures"].get(_fig_name)
+            _pre += f"<h3>{_title}</h3>{_img_tag(_uri, _title)}"
+        _pre += "</div>"
+        _sections.append(_pre)
+
+        # ── Training (UCMC only) ──
+        if _site == training_site:
+            _train = '<div class="section"><h2>Training Results</h2>'
+            _uri8 = _d["figures"].get("fig8_training_curves")
+            _train += f"<h3>Training Loss Curves</h3>{_img_tag(_uri8, 'Training Curves')}"
+            _train += f"<h3>Training History</h3>{_csv_to_html(_d.get('training_history'))}"
+            _uri9 = _d["figures"].get("fig9_action_distribution")
+            _train += f"<h3>Action Distribution (RL vs Clinician)</h3>{_img_tag(_uri9, 'Action Dist')}"
+            _train += f"<h3>Action Summary</h3>{_csv_to_html(_d.get('test_action_summary'))}"
+            _train += "</div>"
+            _sections.append(_train)
+
+            # Evaluation tables (test set)
+            _eval = '<div class="section"><h2>Model Evaluation (Test Set)</h2>'
+            _eval += f"<h3>Agreement Bins</h3>{_csv_to_html(_d.get('bin_summary'))}"
+            _eval += f"<h3>Ordinal Logistic Regression</h3>{_csv_to_html(_d.get('coef_summary'))}"
+            _eval += "</div>"
+            _sections.append(_eval)
+
+        # ── External Validation (all sites) ──
+        _meta = _d.get("ext_val_metadata")
+        if _meta:
+            _p_val = _meta.get("ordinal_pvalue", 1)
+            _p_str = "< 0.001" if _p_val < 0.001 else f"{_p_val:.3e}"
+            _ext = f"""<div class="section">
+            <h2>External Validation</h2>
+            <table class="data-table">
+                <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>Training site</td><td>{_meta.get('training_site', 'N/A')}</td></tr>
+                <tr><td>N patients</td><td>{_meta.get('n_patients', 'N/A'):,}</td></tr>
+                <tr><td>N transitions (patient-hours)</td><td>{_meta.get('n_transitions', 'N/A'):,}</td></tr>
+                <tr><td>Overall Agreement</td><td>{_meta.get('overall_agreement', 0):.1%}</td></tr>
+                <tr><td>Concordance OR (full unit)</td><td>{_meta.get('ordinal_or', 0):.1f}</td></tr>
+                <tr><td>p-value</td><td>{_p_str}</td></tr>
+            </table>"""
+
+            for _fig_name, _title in _ext_val_figs:
+                _uri = _d["ext_val_figures"].get(_fig_name)
+                _ext += f"<h3>{_title}</h3>{_img_tag(_uri, _title)}"
+
+            _ext += f"<h3>Action Summary</h3>{_csv_to_html(_d.get('ext_val_action'))}"
+            _ext += f"<h3>Agreement Bins</h3>{_csv_to_html(_d.get('ext_val_bin'))}"
+            _ext += f"<h3>Ordinal Logistic Regression</h3>{_csv_to_html(_d.get('ext_val_coef'))}"
+            _ext += "</div>"
+            _sections.append(_ext)
+
+        per_site_html[_site] = "\n".join(_sections)
+        logger.info("Built per-site HTML for %s: %d sections", _site, len(_sections))
+
+    mo.md(f"Built per-site HTML for **{len(per_site_html)}** sites")
+    return (per_site_html,)
+
+
+# ── Cell 5: Assemble Full HTML Dashboard ──────────────────────────────
+@app.cell
+def _(logger, mo, overview_html, pd, per_site_html, site_names, SITE_LABELS):
+    _tabs = [("overview", "Combined Overview", overview_html)]
+    for _site in site_names:
+        _label = SITE_LABELS.get(_site, _site.upper())
+        _tabs.append((_site, _label, per_site_html.get(_site, "<p>No data</p>")))
+
     _tab_buttons = "\n".join(
-        f'        <button class="tab-btn{" active" if i == 0 else ""}" '
-        f'onclick="switchTab(\'{tid}\')" id="btn-{tid}">{label}</button>'
-        for i, (tid, label, _) in enumerate(_tabs)
+        f'        <button class="tab-btn{" active" if _i == 0 else ""}" '
+        f'onclick="switchTab(\'{_tid}\')" id="btn-{_tid}">{_label}</button>'
+        for _i, (_tid, _label, _) in enumerate(_tabs)
     )
 
     _tab_contents = "\n".join(
-        f'    <div class="tab-content{" active" if i == 0 else ""}" id="tab-{tid}">\n{content}\n    </div>'
-        for i, (tid, _, content) in enumerate(_tabs)
+        f'    <div class="tab-content{" active" if _i == 0 else ""}" id="tab-{_tid}">\n{_content}\n    </div>'
+        for _i, (_tid, _, _content) in enumerate(_tabs)
     )
+
+    _site_list = ", ".join(s.upper() for s in site_names)
 
     dashboard_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OHCA-RL Dashboard — {site_name}</title>
+    <title>OHCA-RL Multi-Site Dashboard</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -445,6 +990,7 @@ def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining
             border-collapse: collapse;
             margin: 10px 0 20px 0;
             font-size: 12px;
+            table-layout: auto;
         }}
         th {{
             background: #1565C0;
@@ -453,11 +999,18 @@ def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining
             text-align: left;
             font-weight: 500;
             border: 1px solid #1256A0;
+            white-space: nowrap;
         }}
         td {{
             padding: 8px 12px;
             border: 1px solid #e0e0e0;
             vertical-align: top;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+        }}
+        td:first-child {{
+            min-width: 200px;
+            white-space: normal;
         }}
         tr:nth-child(even) {{ background: #fafafa; }}
         tr:hover {{ background: #f0f7ff; }}
@@ -473,8 +1026,8 @@ def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining
 </head>
 <body>
     <div class="header">
-        <h1>OHCA-RL Results Dashboard</h1>
-        <p>{site_name} | Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <h1>OHCA-RL Multi-Site Results Dashboard</h1>
+        <p>{_site_list}</p>
     </div>
 
     <div class="tab-bar">
@@ -486,7 +1039,7 @@ def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining
     </div>
 
     <div class="footer">
-        <p>OHCA-RL: Out-of-Hospital Cardiac Arrest Reinforcement Learning</p>
+        <p>OHCA-RL: Out-of-Hospital Cardiac Arrest Reinforcement Learning | Multi-Site Dashboard</p>
     </div>
 
     <script>
@@ -500,31 +1053,30 @@ def _(evaluation_html, external_html, logger, mo, overview_html, pd, pretraining
 </body>
 </html>"""
 
-    logger.info("Assembled dashboard HTML: %d characters", len(dashboard_html))
-    mo.md(f"Dashboard HTML assembled: **{len(dashboard_html):,}** characters")
+    logger.info("Assembled multi-site dashboard: %d chars", len(dashboard_html))
+    mo.md(f"Dashboard assembled: **{len(dashboard_html):,}** characters, **{len(_tabs)}** tabs")
     return (dashboard_html,)
 
 
-# ── Cell 4: Save Dashboard ────────────────────────────────────────────
+# ── Cell 6: Save Dashboard ────────────────────────────────────────────
 @app.cell
-def _(dashboard_html, final_dir, logger, mo):
-    _dashboard_path = final_dir / "ohca_rl_dashboard.html"
-    with open(_dashboard_path, "w", encoding="utf-8") as _f:
+def _(dashboard_html, logger, mo, output_dir):
+    _path = output_dir / "ohca_rl_multisite_dashboard.html"
+    with open(_path, "w", encoding="utf-8") as _f:
         _f.write(dashboard_html)
 
-    _size_mb = _dashboard_path.stat().st_size / 1024 / 1024
-
-    logger.info("Saved dashboard: %s (%.1f MB)", _dashboard_path, _size_mb)
+    _size_mb = _path.stat().st_size / 1024 / 1024
+    logger.info("Saved multi-site dashboard: %s (%.1f MB)", _path, _size_mb)
 
     mo.md(f"""
     ## Dashboard Saved
 
     | | |
     |---|---|
-    | **Path** | `{_dashboard_path}` |
+    | **Path** | `{_path}` |
     | **Size** | {_size_mb:.1f} MB |
 
-    Open in a browser to view the interactive tabbed dashboard.
+    Open in a browser to view the interactive multi-site tabbed dashboard.
     """)
     return
 
