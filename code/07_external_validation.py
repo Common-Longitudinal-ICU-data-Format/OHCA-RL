@@ -8,6 +8,8 @@
 #     "torch",
 #     "statsmodels",
 #     "tabulate",
+#     "matplotlib",
+#     "seaborn",
 # ]
 # ///
 
@@ -125,7 +127,7 @@ def _(mo, np, pd, out_dir, ext_action_remap):
     local_df = local_df.query("ever_vaso == 1").copy()
 
     # Remap actions to PI's encoding
-    _remap = {int(k): int(v) for k, v in ext_action_remap["pipeline_to_pi"].items()}
+    _remap = {int(k): int(v) for k, v in ext_action_remap["pipeline_to_new"].items()}
     local_df["action"] = local_df["action"].map(_remap)
 
     # ── Respiratory mode dummies ──
@@ -552,6 +554,10 @@ def _(
         or_value = np.exp(coef)
         ci_low = np.exp(coef - 1.96 * se)
         ci_high = np.exp(coef + 1.96 * se)
+        # Per-10pp OR (clinically reported: odds change per 10pp increase)
+        or_10pp = np.exp(coef * 0.10)
+        or_10pp_ci_low = np.exp((coef - 1.96 * se) * 0.10)
+        or_10pp_ci_high = np.exp((coef + 1.96 * se) * 0.10)
         return pd.DataFrame({
             "term": [predictor_name],
             "coef": [coef],
@@ -560,6 +566,9 @@ def _(
             "odds_ratio": [or_value],
             "or_95ci_low": [ci_low],
             "or_95ci_high": [ci_high],
+            "or_10pp": [or_10pp],
+            "or_10pp_ci_low": [or_10pp_ci_low],
+            "or_10pp_ci_high": [or_10pp_ci_high],
         })
 
     def agreement_bin_summary(patient_df):
@@ -622,6 +631,217 @@ def _(
         f"Results saved to `{eval_dir}`"
     )
 
+    return ext_patient_df, ext_coef_summary, ext_bin_summary
+
+
+# ── Cell 7: External Validation Figures ───────────────────────────────
+@app.cell
+def _(
+    mo, np, pd, os,
+    transition_all, ext_pred, ext_patient_df, ext_coef_summary, ext_bin_summary,
+    ext_summary_df, eval_dir, site_name,
+):
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    import seaborn as sns
+
+    _fig_dir = eval_dir / "figures"
+    os.makedirs(_fig_dir, exist_ok=True)
+
+    # ── Style + constants ──
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.size": 10,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "axes.grid": True,
+        "grid.alpha": 0.2,
+    })
+
+    _ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
+    _ACTION_COLORS = {
+        0: "#E53935",   # red — escalation
+        1: "#42A5F5",   # blue — de-escalation
+        2: "#66BB6A",   # green — liberation
+        3: "#F8BBD0",   # light pink — maintenance
+    }
+    _CPC_COLORS = {
+        "CPC1_2": "#22c55e",
+        "CPC3": "#facc15",
+        "CPC4": "#f97316",
+        "CPC5": "#ef4444",
+    }
+
+    def _save_fig(fig, name):
+        fig.savefig(_fig_dir / f"{name}.pdf", dpi=300, bbox_inches="tight")
+        fig.savefig(_fig_dir / f"{name}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # ── Fig 1: Action Distribution (diverging bar chart) ──
+    _actions = sorted(ext_summary_df.index.tolist())
+    _pred_counts = [int(ext_summary_df.loc[_a, "pred_count"]) for _a in _actions]
+    _obs_counts = [int(ext_summary_df.loc[_a, "obs_count"]) for _a in _actions]
+    _labels = [_ACTION_LABELS[_a] for _a in _actions]
+    _colors = [_ACTION_COLORS[_a] for _a in _actions]
+
+    _fig1, _ax1 = plt.subplots(figsize=(10, 5))
+    _y = np.arange(len(_actions))
+    _ax1.barh(_y + 0.15, _pred_counts, height=0.3, color=_colors, edgecolor="black",
+              linewidth=0.5, label="RL Policy")
+    _ax1.barh(_y - 0.15, _obs_counts, height=0.3, color=_colors, edgecolor="black",
+              linewidth=0.5, alpha=0.5, label="Clinician")
+    _ax1.set_yticks(_y)
+    _ax1.set_yticklabels(_labels)
+    _ax1.set_xlabel("Number of Transitions")
+    _ax1.set_title(f"Action Distribution: RL vs Clinician — {site_name}", fontweight="bold")
+    _ax1.legend(loc="lower right")
+    _save_fig(_fig1, "fig_action_distribution")
+
+    # ── Fig 2: Patient Timeline Heatmaps ──
+    _df_eval = transition_all.copy().reset_index(drop=True)
+    _df_eval["pred_action"] = ext_pred["pred_actions"]
+
+    # Merge CPC outcomes
+    _cpc_map = ext_patient_df[["hospitalization_id", "cpc"]].drop_duplicates()
+    _df_eval = _df_eval.merge(_cpc_map, on="hospitalization_id", how="left")
+
+    # Sample patients with at least 12h trajectories
+    _traj_len = _df_eval.groupby("hospitalization_id").size().reset_index(name="n_steps")
+    _traj_len = _traj_len[_traj_len["n_steps"] >= 12]
+    _sample_ids = _traj_len.sample(n=min(100, len(_traj_len)), random_state=42)
+    _sample_ids = _sample_ids.sort_values("n_steps", ascending=False)["hospitalization_id"].tolist()
+
+    if len(_sample_ids) > 0:
+        _max_t = int(_df_eval["time_bucket"].max()) + 1
+        _n_patients = len(_sample_ids)
+
+        _physician_matrix = np.full((_n_patients, _max_t), np.nan)
+        _rl_matrix = np.full((_n_patients, _max_t), np.nan)
+        _cpc_list = []
+        _last_bucket = []
+
+        for _i, _pid in enumerate(_sample_ids):
+            _patient = _df_eval[_df_eval["hospitalization_id"] == _pid].sort_values("time_bucket")
+            for _, _row in _patient.iterrows():
+                _t = int(_row["time_bucket"])
+                if _t < _max_t:
+                    _physician_matrix[_i, _t] = _row["action"]
+                    _rl_matrix[_i, _t] = _row["pred_action"]
+            _cpc_list.append(_patient["cpc"].iloc[0] if len(_patient) > 0 else "unknown")
+            _last_bucket.append(int(_patient["time_bucket"].max()))
+
+        _cmap = ListedColormap([_ACTION_COLORS[_a] for _a in range(4)])
+        _norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], 4)
+
+        _fig2, (_ax2a, _ax2b) = plt.subplots(2, 1, figsize=(14, 10))
+
+        for _ax, _matrix, _title in [
+            (_ax2a, _physician_matrix, "Clinician Actions"),
+            (_ax2b, _rl_matrix, "RL Recommended Actions"),
+        ]:
+            _ax.imshow(_matrix, aspect="auto", cmap=_cmap, norm=_norm,
+                       interpolation="nearest", origin="upper")
+            for _i, (_cpc, _lb) in enumerate(zip(_cpc_list, _last_bucket)):
+                _color = _CPC_COLORS.get(_cpc, "#888888")
+                _ax.plot(_lb, _i, marker="D", color=_color, markersize=3,
+                         markeredgecolor="black", markeredgewidth=0.3)
+            _ax.set_ylabel("Patients (sorted by trajectory length)")
+            _ax.set_title(_title, fontsize=12, fontweight="bold")
+            _ax.set_xlim(-0.5, min(_max_t, 120) - 0.5)
+            for _h in range(24, 121, 24):
+                _ax.axvline(_h - 0.5, color="white", linewidth=0.5, alpha=0.5)
+
+        _ax2b.set_xlabel("Hours Since First Event")
+
+        # Legend at the bottom
+        _action_patches = [mpatches.Patch(color=_ACTION_COLORS[_a], label=_ACTION_LABELS[_a]) for _a in range(4)]
+        _cpc_markers = [plt.Line2D([0], [0], marker="D", color="w", markerfacecolor=_CPC_COLORS[c],
+                                    markersize=6, label=c, markeredgecolor="black", markeredgewidth=0.5)
+                        for c in ["CPC1_2", "CPC3", "CPC4", "CPC5"]]
+        _all_handles = _action_patches + [mpatches.Patch(color="none", label="")] + _cpc_markers
+        _fig2.legend(handles=_all_handles, loc="lower center",
+                     ncol=len(_all_handles), frameon=True, fontsize=8,
+                     bbox_to_anchor=(0.5, -0.04))
+
+        _fig2.suptitle(f"Patient Action Timelines — {site_name}", fontsize=14, y=1.01)
+        _fig2.tight_layout()
+        _save_fig(_fig2, "fig_patient_timelines")
+
+    # ── Fig 3: Agreement-Outcome Bar Chart ──
+    _n_bins = len(ext_bin_summary)
+    _bin_labels = ext_bin_summary["agreement_bin"].tolist()
+    _cpc_means = ext_bin_summary["mean_cpc_ord_good"].tolist()
+    _n_hosps = ext_bin_summary["n_hosp"].tolist()
+
+    _fig3, _ax3 = plt.subplots(figsize=(8, 5))
+    _bar_colors = plt.cm.RdYlGn(np.linspace(0.2, 0.8, _n_bins))
+    _bars = _ax3.bar(range(_n_bins), _cpc_means, color=_bar_colors, edgecolor="black", linewidth=0.5)
+    for _j, (_bar, _n) in enumerate(zip(_bars, _n_hosps)):
+        _ax3.text(_bar.get_x() + _bar.get_width() / 2, _bar.get_height() + 0.02,
+                  f"n={_n}", ha="center", fontsize=9)
+    _ax3.set_xticks(range(_n_bins))
+    _ax3.set_xticklabels(_bin_labels)
+    _ax3.set_xlabel("RL-Clinician Agreement Bin")
+    _ax3.set_ylabel("Mean CPC Ordinal (higher = better)")
+    _ax3.set_title(f"Agreement vs Outcome — {site_name}", fontweight="bold")
+    _ax3.set_ylim(0, max(_cpc_means) * 1.2)
+    _save_fig(_fig3, "fig_agreement_outcome")
+
+    # ── Fig 4: Concordance OR Forest Plot ──
+    _or_10pp = float(ext_coef_summary["or_10pp"].iloc[0])
+    _or_low = float(ext_coef_summary["or_10pp_ci_low"].iloc[0])
+    _or_high = float(ext_coef_summary["or_10pp_ci_high"].iloc[0])
+    _pval = float(ext_coef_summary["p_value"].iloc[0])
+
+    _fig4, _ax4 = plt.subplots(figsize=(8, 3))
+    _ax4.errorbar(_or_10pp, 0, xerr=[[_or_10pp - _or_low], [_or_high - _or_10pp]],
+                  fmt="D", color="#1976D2", markersize=10, capsize=6, linewidth=2, capthick=2)
+    _ax4.axvline(1.0, color="gray", linestyle="--", linewidth=1, alpha=0.7)
+    _ax4.set_yticks([0])
+    _ax4.set_yticklabels([site_name])
+    _ax4.set_xlabel("Odds Ratio per 10pp Agreement Increase")
+    _ax4.set_title(f"Concordance OR — {site_name} (p={_pval:.4f})", fontweight="bold")
+    _ax4.set_xlim(max(0.5, _or_low - 0.2), _or_high + 0.3)
+    _ax4.text(_or_10pp, 0.15, f"{_or_10pp:.2f} [{_or_low:.2f}, {_or_high:.2f}]",
+              ha="center", fontsize=9, fontweight="bold")
+    _save_fig(_fig4, "fig_concordance_or")
+
+    # ── Fig 5: Action Confusion Matrix ──
+    _observed = ext_pred["observed_actions"]
+    _predicted = ext_pred["pred_actions"]
+    _n_actions = 4
+    _conf = np.zeros((_n_actions, _n_actions), dtype=int)
+    for _o, _p in zip(_observed, _predicted):
+        _conf[int(_o), int(_p)] += 1
+
+    # Normalize by row for percentages
+    _conf_pct = _conf / _conf.sum(axis=1, keepdims=True) * 100
+
+    _fig5, _ax5 = plt.subplots(figsize=(7, 6))
+    sns.heatmap(_conf_pct, annot=True, fmt=".1f", cmap="Blues",
+                xticklabels=[_ACTION_LABELS[_a] for _a in range(_n_actions)],
+                yticklabels=[_ACTION_LABELS[_a] for _a in range(_n_actions)],
+                ax=_ax5, vmin=0, vmax=100, cbar_kws={"label": "% of Clinician Action"})
+    # Add raw counts in smaller text
+    for _r in range(_n_actions):
+        for _c in range(_n_actions):
+            _ax5.text(_c + 0.5, _r + 0.72, f"(n={_conf[_r, _c]})",
+                      ha="center", va="center", fontsize=7, color="gray")
+    _ax5.set_xlabel("RL Recommended Action")
+    _ax5.set_ylabel("Clinician Action")
+    _ax5.set_title(f"Action Confusion Matrix — {site_name}", fontweight="bold")
+    _save_fig(_fig5, "fig_action_confusion_matrix")
+
+    mo.md(
+        f"### External Validation Figures\n\n"
+        f"Saved 5 figures to `{_fig_dir}/`:\n\n"
+        f"1. Action distribution (RL vs clinician)\n"
+        f"2. Patient timeline heatmaps\n"
+        f"3. Agreement-outcome bar chart\n"
+        f"4. Concordance OR forest plot\n"
+        f"5. Action confusion matrix"
+    )
     return
 
 

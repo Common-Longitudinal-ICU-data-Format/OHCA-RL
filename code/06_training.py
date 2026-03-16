@@ -52,8 +52,10 @@ def _():
         DataLoader,
         Dataset,
         F,
+        Path,
         checkpoint_dir,
         copy,
+        final_dir,
         json,
         mo,
         nn,
@@ -1227,6 +1229,10 @@ def _(df_test_raw, mo, np, pd, test_pred, training_dir, transition_test):
         or_value = np.exp(coef)
         ci_low = np.exp(coef - 1.96 * se)
         ci_high = np.exp(coef + 1.96 * se)
+        # Per-10pp OR (clinically reported: odds change per 10pp increase)
+        or_10pp = np.exp(coef * 0.10)
+        or_10pp_ci_low = np.exp((coef - 1.96 * se) * 0.10)
+        or_10pp_ci_high = np.exp((coef + 1.96 * se) * 0.10)
         summary_df = pd.DataFrame({
             "term": [predictor_name],
             "coef": [coef],
@@ -1235,6 +1241,9 @@ def _(df_test_raw, mo, np, pd, test_pred, training_dir, transition_test):
             "odds_ratio": [or_value],
             "or_95ci_low": [ci_low],
             "or_95ci_high": [ci_high],
+            "or_10pp": [or_10pp],
+            "or_10pp_ci_low": [or_10pp_ci_low],
+            "or_10pp_ci_high": [or_10pp_ci_high],
         })
         return summary_df
 
@@ -1334,6 +1343,111 @@ def _(
         f"Files:\n"
         + "\n".join(f"- `{dst.name}`" for dst in _files_to_copy.values())
         + "\n- `action_remap.json`"
+    )
+    return
+
+
+# ── Cell: Export to upload_to_box/ + copy results to output/final/ ────
+@app.cell
+def _(
+    Path,
+    checkpoint_dir,
+    df_train_raw,
+    df_test_raw,
+    final_dir,
+    json,
+    mo,
+    os,
+    pd,
+    shared_dir,
+    shutil,
+    site_name,
+    torch,
+    training_dir,
+):
+    # ── 1. Copy training results to output/final/ ──
+    _results_to_copy = [
+        "coef_summary.csv",
+        "bin_summary.csv",
+        "test_action_summary.csv",
+        "training_history.csv",
+        "training_config.json",
+    ]
+    for _fname in _results_to_copy:
+        _src = training_dir / _fname
+        if _src.exists():
+            shutil.copy2(_src, final_dir / _fname)
+
+    # ── 2. Build upload_to_box/ directory ──
+    _upload_dir = Path("output/upload_to_box")
+    _std_dir = _upload_dir / "standardization"
+    _eval_dir = _upload_dir / "evaluation"
+    os.makedirs(_std_dir, exist_ok=True)
+    os.makedirs(_eval_dir, exist_ok=True)
+
+    # Checkpoint with both online + target state dicts
+    _ckpt_path = checkpoint_dir / "best_model.pt"
+    _ckpt = torch.load(_ckpt_path, map_location="cpu", weights_only=False)
+    _n_train = int(df_train_raw["hospitalization_id"].nunique())
+    _n_test = int(df_test_raw["hospitalization_id"].nunique())
+    _best_epoch = int(_ckpt.get("epoch", 0))
+
+    _site_ckpt = {
+        "model_state_dict": _ckpt["model_state_dict"],
+        "target_state_dict": _ckpt.get("target_state_dict", _ckpt["model_state_dict"]),
+        "site_id": site_name,
+        "round": 0,
+        "num_samples": _n_train,
+        "epoch": _best_epoch,
+    }
+    torch.save(_site_ckpt, _upload_dir / f"{site_name}_weights.pt")
+
+    # Metadata JSON
+    _history = pd.read_csv(training_dir / "training_history.csv")
+    _coef = pd.read_csv(training_dir / "coef_summary.csv")
+    _metadata = {
+        "site_id": site_name,
+        "n_train_patients": _n_train,
+        "n_test_patients": _n_test,
+        "n_total_vaso": _n_train + _n_test,
+        "best_epoch": _best_epoch,
+        "best_test_loss": float(_history["test_loss"].min()),
+        "ordinal_coef": float(_coef["coef"].iloc[0]),
+        "ordinal_or_10pp": float(_coef["or_10pp"].iloc[0]),
+        "ordinal_p_value": float(_coef["p_value"].iloc[0]),
+    }
+    with open(_upload_dir / f"{site_name}_metadata.json", "w") as _f:
+        json.dump(_metadata, _f, indent=2)
+
+    # Standardization artifacts (for other sites to download)
+    for _fname in ["best_model.pt", "preprocessor.json", "state_features.json",
+                    "training_config.json", "action_remap.json"]:
+        _src = shared_dir / _fname
+        if _src.exists():
+            shutil.copy2(_src, _std_dir / _fname)
+
+    # Evaluation results (aggregate only — no patient-level data)
+    _eval_files = [
+        (final_dir / "table1_ohca.csv", "table1_ohca.csv"),
+        (final_dir / "table1_ohca_vaso.csv", "table1_ohca_vaso.csv"),
+        (final_dir / "strobe_counts.csv", "strobe_counts.csv"),
+        (training_dir / "coef_summary.csv", "coef_summary.csv"),
+        (training_dir / "bin_summary.csv", "bin_summary.csv"),
+        (training_dir / "test_action_summary.csv", "test_action_summary.csv"),
+    ]
+    for _src, _dst_name in _eval_files:
+        if _src.exists():
+            shutil.copy2(_src, _eval_dir / _dst_name)
+
+    mo.md(
+        f"**Export complete.**\n\n"
+        f"**Training results → `output/final/`:**\n"
+        + "\n".join(f"- `{f}`" for f in _results_to_copy)
+        + f"\n\n**Upload package → `output/upload_to_box/`:**\n"
+        f"- `{site_name}_weights.pt` ({_n_train} train patients)\n"
+        f"- `{site_name}_metadata.json`\n"
+        f"- `standardization/` (5 files for external sites)\n"
+        f"- `evaluation/` ({len([s for s, _ in _eval_files if s.exists()])} aggregate CSVs)"
     )
     return
 

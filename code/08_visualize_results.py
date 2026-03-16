@@ -69,7 +69,7 @@ def _():
         0: "#E53935",   # red — escalation
         1: "#42A5F5",   # blue — de-escalation
         2: "#66BB6A",   # green — liberation
-        3: "#FFA726",   # orange — maintenance
+        3: "#F8BBD0",   # light pink — maintenance
     }
 
     # CPC endpoint colors
@@ -389,17 +389,16 @@ def _(ACTION_COLORS, ACTION_LABELS, BoundaryNorm, CPC_COLORS, ListedColormap, ha
 
         ax10b.set_xlabel("Hours Since First Event")
 
-        # Build legends
+        # Build legends at the bottom of the figure
         _action_patches = [mpatches.Patch(color=ACTION_COLORS[_a], label=ACTION_LABELS[_a]) for _a in range(4)]
         _cpc_markers = [plt.Line2D([0], [0], marker="D", color="w", markerfacecolor=CPC_COLORS[c],
                                     markersize=6, label=c, markeredgecolor="black", markeredgewidth=0.5)
                         for c in ["CPC1_2", "CPC3", "CPC4", "CPC5"]]
 
-        _legend1 = ax10a.legend(handles=_action_patches, loc="upper right", title="Action",
-                                frameon=True, fontsize=8, title_fontsize=9)
-        ax10a.add_artist(_legend1)
-        ax10b.legend(handles=_cpc_markers, loc="upper right", title="Outcome",
-                     frameon=True, fontsize=8, title_fontsize=9)
+        _all_handles = _action_patches + [mpatches.Patch(color="none", label="")] + _cpc_markers
+        fig10.legend(handles=_all_handles, loc="lower center",
+                     ncol=len(_all_handles), frameon=True, fontsize=8,
+                     bbox_to_anchor=(0.5, -0.04))
 
         fig10.suptitle(f"Patient Action Timelines — {site_name}", fontsize=14, y=1.01)
         fig10.tight_layout()

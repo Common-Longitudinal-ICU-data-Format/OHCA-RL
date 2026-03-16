@@ -1,46 +1,46 @@
- ## Code directory
+## Code Directory
 
-Update this README with the specific project workflow instructions.
-This directory contains scripts for the project workflow. The general workflow consists of three main steps: cohort identification, quality control, and analysis. Scripts can be implemented in R or Python, depending on project requirements. Please note that this workflow is just a suggestion, and you may change the structure to suit your project needs.
+All scripts are [marimo](https://marimo.io/) reactive Python notebooks that can be run headlessly or interactively.
 
-### General Workflow
+### Pipeline Steps
 
-1. Run the cohort_identification script
-   This script should:
-   - Apply inclusion and exclusion criteria
-   - Select required fields from each table
-   - Filter tables to include only required observations
+| Step | Script | Mode | Description |
+|------|--------|------|-------------|
+| 00 | `00_cohort_identification.py` | Both | Apply ICD inclusion/exclusion criteria, identify OHCA cohort, generate CONSORT diagram |
+| 01 | `01_create_wide_df.py` | Both | Load CLIF tables, unit conversion via clifpy, pivot to wide hourly DataFrame |
+| 02 | `02_sofa_calculator.py` | Both | Calculate SOFA component and total scores |
+| 03 | `03_ffill_and_bucketing.py` | Both | Forward-fill imputation, 1-hour time bucketing, vasopressor action inference |
+| 04 | `04_create_tableone.py` | Both | Baseline characteristics table (full cohort + vasopressor-only subset) |
+| 05 | `05_figures.py` | Both | Pre-training descriptive figures (missingness, vitals, labs, SOFA, treatments) |
+| 06 | `06_training.py` | Training | Double DQN training, concordance evaluation, export to `shared/` and `upload_to_box/` |
+| 07 | `07_external_validation.py` | Validation | Apply trained model from `shared/` to local data, compute concordance metrics |
+| 08 | `08_visualize_results.py` | Training | Post-training figures (action distributions, patient timelines, OR forest plot) |
+| 09 | `09_combined_dashboard.py` | Training | Standalone HTML dashboard aggregating all results |
 
-   Expected outputs:
-   - cohort_ids: a list of unique identifiers for the study cohort
-   - cohort_data: the filtered study cohort data
-   - cohort_summary: a summary table describing the study cohort
+**Training mode** = coordinating center (runs steps 00-06, 08-09)
+**Validation mode** = external sites (runs steps 00-05, 07)
 
-   Examples of cohort identification scripts:
-   - [`code/templates/Python/01_cohort_identification_template.py`](templates/Python/01_cohort_identification_template.py)
-   - [`code/templates/R/01_cohort_identification_template.R`](templates/R/01_cohort_identification_template.R)
+### Supporting Files
 
-2. Run the quality_control script
-   This script should:
-   - Perform project-specific quality control checks on the filtered cohort data
-   - Handle outliers using predefined thresholds as given in `outlier-thresholds` directory. 
-   - Clean and preprocess the data for analysis
+| File | Purpose |
+|------|---------|
+| `ohca_training.py` | Shared utilities: QNetwork, dataset classes, training helpers |
+| `utils.py` | General utility functions |
 
-   Script: [`code/templates/R/02_project_quality_checks_template.R`](templates/R/02_project_quality_checks_template.R) & [`code/templates/R/03_outlier_handling_template.R`](templates/R/03_outlier_handling_template.R) 
+### Running
 
-   Input: cohort_data 
+Headless (batch):
+```bash
+uv run code/00_cohort_identification.py
+```
 
-   Output: cleaned_cohort_data 
+Interactive (browser):
+```bash
+uv run marimo edit code/00_cohort_identification.py
+```
 
-3. Run the analysis script(s)
-   This script (or set of scripts) should contain the main analysis code for the project.
-   It may be broken down into multiple scripts if necessary.
-   
-   Script: [`code/templates/R/04_project_analysis_template.R`](templates/R/04_project_analysis_template.R) 
-
-   Input: cleaned_cohort_data 
-
-   Output: [List of expected result files, e.g., statistical_results, figures, tables saved in the [`output/final`](../output/README.md) directory] 
-
-
-
+Full pipeline:
+```bash
+bash run_pipeline.sh                  # training site
+bash run_external_validation.sh       # validation site
+```

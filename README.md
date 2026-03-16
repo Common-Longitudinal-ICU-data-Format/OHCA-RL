@@ -6,7 +6,7 @@
 
 ## Objective
 
-Develop a federated reinforcement learning framework for optimizing ICU management of out-of-hospital cardiac arrest (OHCA) patients using the Common Longitudinal ICU Format (CLIF). 
+Develop a federated reinforcement learning framework for optimizing ICU management of out-of-hospital cardiac arrest (OHCA) patients using the Common Longitudinal ICU Format (CLIF).
 
 ## Required CLIF Tables and Fields
 
@@ -36,14 +36,30 @@ For Python users, the [clifpy](https://common-longitudinal-icu-data-format.githu
 3. First encounter per patient (deduplicated by earliest admission)
 4. ICU-admitted only (exclude ED-only patients via ADT location data)
 
-## Expected Results
+## Pipeline
 
-- CONSORT flow diagram and cohort summary statistics (`output/final/`)
-- Trained DDQN+CQL policy for OHCA ICU management
-- Federated model weights (Phase 1: local, Phase 2: FedAvg aggregated)
-- Evaluation: concordance with clinician actions, mortality odds ratios, action distributions
+There are two modes: **Training Site** (UCMC) runs the full pipeline including model training; **Validation Sites** skip training and run external validation using the trained model.
 
-## Detailed Instructions
+| Step | Script | Mode | Description |
+|------|--------|------|-------------|
+| 00 | `00_cohort_identification.py` | Both | OHCA cohort with CONSORT diagram |
+| 01 | `01_create_wide_df.py` | Both | CLIF tables, unit conversion, pivot to wide DataFrame |
+| 02 | `02_sofa_calculator.py` | Both | SOFA score calculation |
+| 03 | `03_ffill_and_bucketing.py` | Both | Forward-fill imputation, 1h bucketing, action inference |
+| 04 | `04_create_tableone.py` | Both | Baseline characteristics (full cohort + vasopressor-only) |
+| 05 | `05_figures.py` | Both | Pre-training figures (PDFs + PNGs) |
+| 06 | `06_training.py` | Training only | DDQN local training + concordance evaluation |
+| 07 | `07_external_validation.py` | Validation only | Apply trained model to local data |
+| 08 | `08_visualize_results.py` | Training only | Post-training concordance figures |
+| 09 | `09_combined_dashboard.py` | Training only | Standalone HTML dashboard |
+
+Scripts are [marimo](https://marimo.io/) notebooks and can also be run interactively:
+
+```bash
+uv run marimo edit code/00_cohort_identification.py
+```
+
+## Setup
 
 ### 1. Update `config/config.json`
 
@@ -66,7 +82,11 @@ Requires [uv](https://docs.astral.sh/uv/). Install dependencies and create the v
 uv sync
 ```
 
-### 3. Run the Pipeline
+## Running the Pipeline
+
+### Training Site (Coordinating Center)
+
+Runs all steps including DDQN training, visualization, and dashboard generation.
 
 **Mac/Linux:**
 
@@ -80,7 +100,23 @@ bash run_pipeline.sh
 run_pipeline.bat
 ```
 
-Both scripts run all steps sequentially, halt on first failure, and save a timestamped log to `output/final/pipeline_<timestamp>.log`.
+### Validation Site (External Validation)
+
+Runs data preparation (steps 00-05) and external validation (step 07). Requires trained model artifacts in `shared/` — download from Box first. See [SITE_INSTRUCTIONS.md](SITE_INSTRUCTIONS.md) for the full setup guide.
+
+**Mac/Linux:**
+
+```bash
+bash run_external_validation.sh
+```
+
+**Windows:**
+
+```cmd
+run_external_validation.bat
+```
+
+Both scripts run steps sequentially, halt on first failure, and save a timestamped log to `output/final/`.
 
 Or run individual steps:
 
@@ -88,17 +124,3 @@ Or run individual steps:
 uv run code/00_cohort_identification.py
 ```
 
-| Step | Script | Description |
-|------|--------|-------------|
-| 00 | `00_cohort_identification.py` | OHCA cohort identification with CONSORT diagram |
-| 01 | `01_create_wide_df.py` | Load CLIF tables, unit conversion, pivot to wide DataFrame |
-| 02 | `02_sofa_calculator.py` | SOFA score calculation |
-| 03 | `03_ffill_and_bucketing.py` | Forward-fill imputation, 1h time bucketing, action inference |
-| 04 | `04_create_tableone.py` | Baseline characteristics table |
-| 05 | `05_figures.py` | Pre-training figures (PDFs + CSVs for multi-site aggregation) |
-
-Scripts are [marimo](https://marimo.io/) notebooks and can also be run interactively:
-
-```bash
-uv run marimo edit code/00_cohort_identification.py
-```

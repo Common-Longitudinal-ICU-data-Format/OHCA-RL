@@ -27,6 +27,8 @@ STEPS=(
     "code/04_create_tableone.py"
     "code/05_figures.py"
     "code/06_training.py"
+    "code/08_visualize_results.py"
+    "code/09_combined_dashboard.py"
 )
 
 # Run pipeline, tee all stdout+stderr to log file
