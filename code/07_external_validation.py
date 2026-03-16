@@ -95,7 +95,7 @@ def _(mo, json, shared_dir):
 def _(mo, np, pd, out_dir, ext_action_remap):
     # Load local bucketed data and hospitalization summary
     _bucketed_df = pd.read_parquet(out_dir / "wide_df_bucketed.parquet")
-    _hosp_summary = pd.read_parquet(out_dir / "hospitalization_summary.parquet")
+    hosp_summary = pd.read_parquet(out_dir / "hospitalization_summary.parquet")
 
     # ── Build demographic features (same as 06_training.py) ──
     def build_demo_features(pa):
@@ -118,7 +118,7 @@ def _(mo, np, pd, out_dir, ext_action_remap):
         pa_new["demo_age"] = pa_new["age_at_admission"]
         return pa_new
 
-    _pa = build_demo_features(_hosp_summary)
+    _pa = build_demo_features(hosp_summary)
     _pa = _pa[["hospitalization_id"] + [c for c in _pa.columns if c.startswith("demo_")]]
 
     local_df = _bucketed_df.merge(_pa, on="hospitalization_id", how="left")
@@ -220,7 +220,7 @@ def _(mo, np, pd, out_dir, ext_action_remap):
         f"{len(local_df):,} hourly rows (vasopressor patients only)"
     )
 
-    return local_df, build_demo_features
+    return local_df, build_demo_features, hosp_summary
 
 
 # ── Cell 3: Apply External Standardization ───────────────────────────
@@ -521,6 +521,7 @@ def _(
     transition_all, ext_pred, local_df_raw,
     ext_agreement, ext_summary_df,
     eval_dir, site_name, ext_training_config,
+    hosp_summary,
 ):
     from statsmodels.miscmodels.ordinal_model import OrderedModel
 
@@ -607,21 +608,109 @@ def _(
     ext_coef_summary = summarize_ordinal_result(ext_result)
     ext_bin_summary = agreement_bin_summary(ext_patient_df)
 
-    # Save all results
+    # Save unadjusted results (unchanged)
     ext_summary_df.to_csv(eval_dir / "action_summary.csv")
     ext_coef_summary.to_csv(eval_dir / "coef_summary.csv", index=False)
     ext_bin_summary.to_csv(eval_dir / "bin_summary.csv", index=False)
 
-    # Save a metadata file
+    # ── Adjusted Concordance Models ──────────────────────────────────
+    def summarize_model(result, predictor_names):
+        """Extract coef, SE, p-value, OR [95% CI] for each predictor."""
+        rows = []
+        for name in predictor_names:
+            _coef = result.params[name]
+            _se = result.bse[name]
+            _pval = result.pvalues[name]
+            _or = np.exp(_coef)
+            _ci_lo = np.exp(_coef - 1.96 * _se)
+            _ci_hi = np.exp(_coef + 1.96 * _se)
+            if name == "agreement_rate":
+                _or_10pp = np.exp(_coef * 0.10)
+                _or_10pp_lo = np.exp((_coef - 1.96 * _se) * 0.10)
+                _or_10pp_hi = np.exp((_coef + 1.96 * _se) * 0.10)
+            else:
+                _or_10pp = np.nan
+                _or_10pp_lo = np.nan
+                _or_10pp_hi = np.nan
+            rows.append({
+                "term": name,
+                "coef": round(_coef, 4),
+                "std_err": round(_se, 4),
+                "p_value": _pval,
+                "odds_ratio": round(_or, 4),
+                "or_95ci_low": round(_ci_lo, 4),
+                "or_95ci_high": round(_ci_hi, 4),
+                "or_10pp": round(_or_10pp, 4) if not np.isnan(_or_10pp) else np.nan,
+                "or_10pp_ci_low": round(_or_10pp_lo, 4) if not np.isnan(_or_10pp_lo) else np.nan,
+                "or_10pp_ci_high": round(_or_10pp_hi, 4) if not np.isnan(_or_10pp_hi) else np.nan,
+            })
+        return pd.DataFrame(rows)
+
+    # Merge baseline covariates for adjusted analysis
+    _adj_covars = [
+        "hospitalization_id", "age_at_admission", "sex_category",
+        "sofa_0_24", "max_nee", "max_lactate",
+    ]
+    _adj_df = ext_patient_df.merge(
+        hosp_summary[_adj_covars], on="hospitalization_id", how="left",
+    )
+    _adj_df["female"] = (_adj_df["sex_category"].str.lower() == "female").astype(int)
+    for _col in ["age_at_admission", "sofa_0_24", "max_nee", "max_lactate"]:
+        _adj_df[_col] = pd.to_numeric(_adj_df[_col], errors="coerce").astype("float64")
+    _adj_df["log_max_nee"] = np.log(_adj_df["max_nee"] + 0.01)
+    _adj_df["log_max_lactate"] = np.log(_adj_df["max_lactate"] + 0.01)
+    _adj_df = _adj_df.dropna(subset=["cpc_ord_good", "age_at_admission", "sofa_0_24"])
+    _y_adj = _adj_df["cpc_ord_good"]
+
+    print(f"\nAdjusted analysis sample: {len(_adj_df)} patients "
+          f"(dropped {len(ext_patient_df) - len(_adj_df)} with missing covariates)")
+
+    # M1: Unadjusted (re-fit on adjusted sample for fair comparison)
+    _X1 = _adj_df[["agreement_rate"]]
+    _res1 = OrderedModel(endog=_y_adj, exog=_X1, distr="logit").fit(method="bfgs", disp=False)
+    _s1 = summarize_model(_res1, ["agreement_rate"])
+    _s1["model"] = "M1: Unadjusted"
+
+    # M2: Adjusted — core confounders (age, sex, admission SOFA)
+    _preds2 = ["agreement_rate", "age_at_admission", "female", "sofa_0_24"]
+    _X2 = _adj_df[_preds2]
+    _res2 = OrderedModel(endog=_y_adj, exog=_X2, distr="logit").fit(method="bfgs", disp=False)
+    _s2 = summarize_model(_res2, _preds2)
+    _s2["model"] = "M2: Adjusted (core)"
+
+    # M3: Adjusted — extended (+ log lactate, log NEE)
+    _preds3 = _preds2 + ["log_max_lactate", "log_max_nee"]
+    _X3 = _adj_df[_preds3]
+    _res3 = OrderedModel(endog=_y_adj, exog=_X3, distr="logit").fit(method="bfgs", disp=False)
+    _s3 = summarize_model(_res3, _preds3)
+    _s3["model"] = "M3: Adjusted (extended)"
+
+    _adj_all = pd.concat([_s1, _s2, _s3], ignore_index=True)
+    _adj_all.to_csv(eval_dir / "adjusted_coef_summary.csv", index=False)
+
+    # Extract adjusted agreement_rate ORs for display
+    _adj_agree = _adj_all[_adj_all["term"] == "agreement_rate"].copy()
+
+    print("\n── Adjusted Concordance Results ──")
+    for _, _r in _adj_agree.iterrows():
+        _p = "p < 0.001" if _r["p_value"] < 0.001 else f"p = {_r['p_value']:.4f}"
+        print(f"  {_r['model']}: OR/10pp = {_r['or_10pp']:.3f} "
+              f"[{_r['or_10pp_ci_low']:.3f}, {_r['or_10pp_ci_high']:.3f}], {_p}")
+
+    # Save metadata file (includes adjusted results)
+    _m2_agree = _adj_agree[_adj_agree["model"] == "M2: Adjusted (core)"].iloc[0]
     _eval_meta = {
         "local_site": site_name,
         "training_site": ext_training_config.get("site_name", "unknown"),
         "n_patients": int(ext_patient_df.hospitalization_id.nunique()),
+        "n_patients_adjusted": int(len(_adj_df)),
         "n_transitions": len(transition_all),
         "overall_agreement": float(ext_agreement),
         "ordinal_coef": float(ext_coef_summary["coef"].iloc[0]),
         "ordinal_or": float(ext_coef_summary["odds_ratio"].iloc[0]),
         "ordinal_pvalue": float(ext_coef_summary["p_value"].iloc[0]),
+        "adjusted_core_or_10pp": float(_m2_agree["or_10pp"]),
+        "adjusted_core_pvalue": float(_m2_agree["p_value"]),
     }
     with open(eval_dir / "evaluation_metadata.json", "w") as _f:
         json.dump(_eval_meta, _f, indent=2)
@@ -633,8 +722,10 @@ def _(
         f"Training site: {ext_training_config.get('site_name', 'unknown')} → "
         f"Validation site: {site_name}\n\n"
         f"**Overall agreement:** {ext_agreement:.1%}\n\n"
-        f"**Ordinal Logistic Regression:**\n\n"
+        f"**Ordinal Logistic Regression (Unadjusted):**\n\n"
         f"{ext_coef_summary.to_markdown(index=False)}\n\n"
+        f"**Adjusted Concordance (agreement_rate OR/10pp):**\n\n"
+        f"{_adj_agree[['model', 'or_10pp', 'or_10pp_ci_low', 'or_10pp_ci_high', 'p_value']].to_markdown(index=False)}\n\n"
         f"**Agreement Bin Summary:**\n\n"
         f"{ext_bin_summary.to_markdown(index=False)}\n\n"
         f"Results saved to `{eval_dir}`"

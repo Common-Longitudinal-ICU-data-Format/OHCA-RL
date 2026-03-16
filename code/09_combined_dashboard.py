@@ -134,6 +134,7 @@ def _(all_site_dir, base64, json, logger, mo, pd, site_names):
         _ext_dir = _dir / "external_validation"
         _d["ext_val_metadata"] = safe_read_json(_ext_dir / "evaluation_metadata.json")
         _d["ext_val_coef"] = safe_read_csv(_ext_dir / "coef_summary.csv")
+        _d["ext_val_adjusted_coef"] = safe_read_csv(_ext_dir / "adjusted_coef_summary.csv")
         _d["ext_val_bin"] = safe_read_csv(_ext_dir / "bin_summary.csv")
         _d["ext_val_action"] = safe_read_csv(_ext_dir / "action_summary.csv")
 
@@ -176,42 +177,102 @@ def _(
         plt.close(fig)
         return f"data:image/png;base64,{_data}"
 
-    # ── Fig A: Multi-Site Forest Plot (per-10pp OR) ──
-    _labels_a = []
-    _ors_a = []
-    _ci_lows_a = []
-    _ci_highs_a = []
-    _pvals_a = []
-    _colors_a = []
-
+    # ── Fig A: Multi-Site Forest Plot (per-10pp OR) — Unadjusted vs Adjusted ──
+    # Collect data for both unadjusted (ext_val_coef) and adjusted (ext_val_adjusted_coef)
+    _forest_rows = []  # list of dicts: site, label, model, or_10pp, ci_low, ci_high, pval, color
     for _site in site_names:
-        _coef = site_data[_site].get("ext_val_coef")
-        if _coef is None or len(_coef) == 0:
-            continue
-        _row = _coef.iloc[0]
-        _labels_a.append(SITE_LABELS.get(_site, _site.upper()))
-        _ors_a.append(float(_row["or_10pp"]))
-        _ci_lows_a.append(float(_row["or_10pp_ci_low"]))
-        _ci_highs_a.append(float(_row["or_10pp_ci_high"]))
-        _pvals_a.append(float(_row["p_value"]))
-        _colors_a.append(SITE_COLORS.get(_site, "#666"))
+        _color = SITE_COLORS.get(_site, "#666")
+        _label = SITE_LABELS.get(_site, _site.upper())
 
-    _fig_a, _ax_a = plt.subplots(figsize=(10, max(3, len(_labels_a) * 1.5 + 1)))
-    _y_a = np.arange(len(_labels_a))
-    for _i, (_label, _o, _lo, _hi, _p, _c) in enumerate(
-            zip(_labels_a, _ors_a, _ci_lows_a, _ci_highs_a, _pvals_a, _colors_a)):
-        _ax_a.errorbar(_o, _i, xerr=[[_o - _lo], [_hi - _o]], fmt="D",
-                       color=_c, markersize=10, capsize=6, linewidth=2, capthick=2)
-        _pstr = "p < 0.001" if _p < 0.001 else f"p = {_p:.3f}"
-        _ax_a.text(_hi + 0.02, _i,
-                   f"  {_o:.2f} [{_lo:.2f}\u2013{_hi:.2f}], {_pstr}",
-                   va="center", fontsize=10)
+        # Unadjusted
+        _coef = site_data[_site].get("ext_val_coef")
+        if _coef is not None and len(_coef) > 0:
+            _row = _coef.iloc[0]
+            _forest_rows.append({
+                "site": _site, "label": _label, "model": "Unadjusted",
+                "or_10pp": float(_row["or_10pp"]),
+                "ci_low": float(_row["or_10pp_ci_low"]),
+                "ci_high": float(_row["or_10pp_ci_high"]),
+                "pval": float(_row["p_value"]),
+                "color": _color,
+            })
+
+        # Adjusted (core) — from adjusted_coef_summary.csv
+        _adj_coef = site_data[_site].get("ext_val_adjusted_coef")
+        if _adj_coef is not None and len(_adj_coef) > 0:
+            _m2 = _adj_coef[
+                (_adj_coef["term"] == "agreement_rate")
+                & (_adj_coef["model"] == "M2: Adjusted (core)")
+            ]
+            if len(_m2) > 0:
+                _row = _m2.iloc[0]
+                _forest_rows.append({
+                    "site": _site, "label": _label, "model": "Adjusted",
+                    "or_10pp": float(_row["or_10pp"]),
+                    "ci_low": float(_row["or_10pp_ci_low"]),
+                    "ci_high": float(_row["or_10pp_ci_high"]),
+                    "pval": float(_row["p_value"]),
+                    "color": _color,
+                })
+
+    # Check if any adjusted data exists
+    _has_adjusted = any(r["model"] == "Adjusted" for r in _forest_rows)
+
+    # Build y-positions: group unadjusted/adjusted per site
+    _seen_sites = []
+    for _r in _forest_rows:
+        if _r["site"] not in _seen_sites:
+            _seen_sites.append(_r["site"])
+
+    _y_positions = []
+    _y_labels = []
+    _y_pos = 0
+    for _site in _seen_sites:
+        _site_rows = [r for r in _forest_rows if r["site"] == _site]
+        for _r in _site_rows:
+            _r["y"] = _y_pos
+            _y_positions.append(_y_pos)
+            if _has_adjusted:
+                _y_labels.append(f"{_r['label']} ({_r['model']})")
+            else:
+                _y_labels.append(_r["label"])
+            _y_pos += 1
+        _y_pos += 0.4  # gap between sites
+
+    _n_rows_a = len(_forest_rows)
+    _fig_a, _ax_a = plt.subplots(figsize=(10, max(3, _n_rows_a * 1.0 + 1)))
+    for _r in _forest_rows:
+        _fmt = "o" if _r["model"] == "Unadjusted" else "D"
+        _fill = _r["color"] if _r["model"] == "Adjusted" else "white"
+        _ax_a.errorbar(
+            _r["or_10pp"], _r["y"],
+            xerr=[[_r["or_10pp"] - _r["ci_low"]], [_r["ci_high"] - _r["or_10pp"]]],
+            fmt=_fmt, color=_r["color"], markerfacecolor=_fill,
+            markersize=10, capsize=6, linewidth=2, capthick=2,
+            markeredgewidth=2,
+        )
+        _pstr = "p < 0.001" if _r["pval"] < 0.001 else f"p = {_r['pval']:.3f}"
+        _ax_a.text(
+            _r["ci_high"] + 0.02, _r["y"],
+            f"  {_r['or_10pp']:.2f} [{_r['ci_low']:.2f}\u2013{_r['ci_high']:.2f}], {_pstr}",
+            va="center", fontsize=9,
+        )
     _ax_a.axvline(1, color="grey", linestyle="--", linewidth=1, alpha=0.7)
-    _ax_a.set_yticks(_y_a)
-    _ax_a.set_yticklabels(_labels_a, fontsize=11)
+    _ax_a.set_yticks(_y_positions)
+    _ax_a.set_yticklabels(_y_labels, fontsize=10)
     _ax_a.set_xlabel("Odds Ratio per 10pp Agreement Increase")
     _ax_a.set_title("Multi-Site Concordance: Agreement Rate \u2192 Better CPC Outcome",
                      fontsize=13, fontweight="bold")
+    if _has_adjusted:
+        from matplotlib.lines import Line2D
+        _legend_handles = [
+            Line2D([0], [0], marker="o", color="grey", markerfacecolor="white",
+                   markersize=10, markeredgewidth=2, linestyle="None", label="Unadjusted"),
+            Line2D([0], [0], marker="D", color="grey", markerfacecolor="grey",
+                   markersize=10, markeredgewidth=2, linestyle="None",
+                   label="Adjusted (age, sex, SOFA)"),
+        ]
+        _ax_a.legend(handles=_legend_handles, loc="lower right", fontsize=10)
     _ax_a.invert_yaxis()
     _fig_a.tight_layout()
     _forest_uri = fig_to_base64(_fig_a)
@@ -297,11 +358,13 @@ def _(
         if _idx == 0:
             _ax.set_ylabel("Percent (%)")
 
-    _fig_c.text(0.02, 0.85, "RL Agent", fontsize=12, fontweight="bold", color="#333")
-    _fig_c.text(0.02, 0.15, "Clinicians", fontsize=12, fontweight="bold", color="#333")
     _fig_c.suptitle("Vasopressor Action Distribution: RL Agent vs Clinician",
                      fontsize=13, fontweight="bold", y=1.02)
-    _fig_c.tight_layout()
+    _fig_c.tight_layout(rect=[0.05, 0, 1, 1])  # reserve 5% left margin for labels
+    _fig_c.text(0.01, 0.72, "RL Agent \u2191", fontsize=10, fontweight="bold",
+                color="#333", va="center", ha="left", rotation=90)
+    _fig_c.text(0.01, 0.28, "\u2193 Clinicians", fontsize=10, fontweight="bold",
+                color="#333", va="center", ha="left", rotation=90)
     _action_dist_uri = fig_to_base64(_fig_c)
 
     # ── Fig D & E: Combined Missingness Heatmaps (Before & After) ──
@@ -750,11 +813,6 @@ def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site
     </div>
 
     <div class="section">
-        <h2>Clinical Trajectories</h2>
-        {_img(combined_figures.get("clinical_distributions"), "Clinical Trajectories", "100%")}
-    </div>
-
-    <div class="section">
         <h2>Multi-Site Concordance</h2>
 
         <h3>Concordance OR Forest Plot (per 10pp Agreement Increase)</h3>
@@ -765,6 +823,11 @@ def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site
 
         <h3>Action Distribution Comparison</h3>
         {_img(combined_figures.get("action_distribution"), "Action Distribution", "100%")}
+    </div>
+
+    <div class="section">
+        <h2>Supplemental: Clinical Trajectories</h2>
+        {_img(combined_figures.get("clinical_distributions"), "Clinical Trajectories", "100%")}
     </div>
 
     <div class="section">
