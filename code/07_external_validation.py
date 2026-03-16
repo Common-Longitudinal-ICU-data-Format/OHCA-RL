@@ -174,6 +174,20 @@ def _(mo, np, pd, out_dir, ext_action_remap):
 
     local_df = build_resp_mode_dummies(local_df)
     local_df = build_resp_device_dummies(local_df)
+
+    # Ensure all expected dummy columns exist (training site may have
+    # categories absent in the validation site)
+    for _prefix, _levels in [
+        ("resp_mode", ["controlled_or_mandatory_ventilation",
+                       "spontaneous_or_lighter_support", "unknown_or_other"]),
+        ("resp_device", ["high_intensity", "low_intensity",
+                         "moderate_intensity", "unknown"]),
+    ]:
+        for _lvl in _levels:
+            _cname = f"{_prefix}_{_lvl}"
+            if _cname not in local_df.columns:
+                local_df[_cname] = 0
+
     local_df = add_delta_features(local_df)
 
     # ── Compute rewards (same as training) ──
