@@ -800,39 +800,38 @@ def _(bucketed_df, logger, mo, np, ohca_config):
 
     actioned_df = bucketed_df.copy()
 
-    # NEE at current and previous bucket (per patient)
+    # NEE at current and next bucket (per patient) — forward-looking
+    # action_t = transition from state_t to state_{t+1} (Markov-consistent)
     _nee = actioned_df.groupby("hospitalization_id")["med_cont_nee"]
-    _nee_prev = _nee.shift(1)
-    _delta_nee = actioned_df["med_cont_nee"] - _nee_prev
+    _nee_next = _nee.shift(-1)
+    _nee_cur = actioned_df["med_cont_nee"]
+    _delta_nee = _nee_next - _nee_cur
 
     # Action encoding:
     #   0 = stay     (|delta| < tolerance)
-    #   1 = increase (delta >= tolerance, OR NEE went from 0 to >0)
-    #   2 = decrease (delta <= -tolerance, NEE still > 0)
-    #   3 = stop     (NEE drops to 0 from > 0)
+    #   1 = increase (delta >= tolerance, OR NEE goes from 0 to >0)
+    #   2 = decrease (delta <= -tolerance, NEE at t+1 still > 0)
+    #   3 = stop     (NEE at t > 0, NEE at t+1 == 0)
     _action = np.full(len(actioned_df), 0, dtype=np.int8)  # default: stay
 
-    _nee_cur = actioned_df["med_cont_nee"]
-    _nee_lag = _nee_prev
-
-    # Increase: NEE went up by >= tolerance (includes start: 0 → >0)
+    # Increase: NEE will go up by >= tolerance (includes start: 0 → >0)
     _action = np.where(_delta_nee >= _tol, 1, _action)
 
-    # Decrease: NEE went down by >= tolerance, but NEE still > 0
+    # Decrease: NEE will go down by >= tolerance, but NEE at t+1 still > 0
     _action = np.where(
-        (_delta_nee <= -_tol) & (_nee_cur > 0),
+        (_delta_nee <= -_tol) & (_nee_next > 0),
         2, _action,
     )
 
-    # Stop: NEE was > 0, now == 0
+    # Stop: NEE at t > 0, NEE at t+1 == 0
     _action = np.where(
-        (_nee_lag > 0) & (_nee_cur == 0),
+        (_nee_cur > 0) & (_nee_next == 0),
         3, _action,
     )
 
-    # First bucket per patient: no previous state → stay (0)
-    _first_bucket = _nee_lag.isna()
-    _action = np.where(_first_bucket, 0, _action)
+    # Last bucket per patient: no next state → stay (0) — terminal
+    _last_bucket = _nee_next.isna()
+    _action = np.where(_last_bucket, 0, _action)
 
     actioned_df["action"] = _action
 

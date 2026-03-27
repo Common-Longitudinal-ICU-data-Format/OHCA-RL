@@ -52,17 +52,24 @@ def _():
             training_site = _s
             break
 
+    # Move training site to end so it always appears last in tables/charts
+    if training_site and training_site in site_names:
+        site_names.remove(training_site)
+        site_names.append(training_site)
+
     SITE_COLORS = {
         "ucmc": "#1565C0",
         "rush": "#E53935",
         "emory": "#43A047",
         "nu": "#757575",
+        "ucsf": "#FF9800",
     }
     SITE_LABELS = {
         "ucmc": "UCMC (Training)",
         "rush": "Rush",
         "emory": "Emory",
         "nu": "NU",
+        "ucsf": "UCSF",
     }
     ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
     ACTION_COLORS = {
@@ -178,8 +185,10 @@ def _(
         return f"data:image/png;base64,{_data}"
 
     # ── Fig A: Multi-Site Forest Plot (per-10pp OR) — Unadjusted vs Adjusted ──
-    # Collect data for both unadjusted (ext_val_coef) and adjusted (ext_val_adjusted_coef)
-    _forest_rows = []  # list of dicts: site, label, model, or_10pp, ci_low, ci_high, pval, color
+    from matplotlib.lines import Line2D
+
+    # Collect data for both unadjusted and adjusted (core)
+    _forest_rows = []
     for _site in site_names:
         _color = SITE_COLORS.get(_site, "#666")
         _label = SITE_LABELS.get(_site, _site.upper())
@@ -215,64 +224,96 @@ def _(
                     "color": _color,
                 })
 
-    # Check if any adjusted data exists
     _has_adjusted = any(r["model"] == "Adjusted" for r in _forest_rows)
 
-    # Build y-positions: group unadjusted/adjusted per site
+    # Build y-positions: pair unadjusted/adjusted on same row per site
     _seen_sites = []
     for _r in _forest_rows:
         if _r["site"] not in _seen_sites:
             _seen_sites.append(_r["site"])
 
-    _y_positions = []
-    _y_labels = []
-    _y_pos = 0
-    for _site in _seen_sites:
-        _site_rows = [r for r in _forest_rows if r["site"] == _site]
-        for _r in _site_rows:
-            _r["y"] = _y_pos
-            _y_positions.append(_y_pos)
-            if _has_adjusted:
-                _y_labels.append(f"{_r['label']} ({_r['model']})")
-            else:
-                _y_labels.append(_r["label"])
-            _y_pos += 1
-        _y_pos += 0.4  # gap between sites
-
-    _n_rows_a = len(_forest_rows)
-    _fig_a, _ax_a = plt.subplots(figsize=(10, max(3, _n_rows_a * 1.0 + 1)))
-    for _r in _forest_rows:
-        _fmt = "o" if _r["model"] == "Unadjusted" else "D"
-        _fill = _r["color"] if _r["model"] == "Adjusted" else "white"
-        _ax_a.errorbar(
-            _r["or_10pp"], _r["y"],
-            xerr=[[_r["or_10pp"] - _r["ci_low"]], [_r["ci_high"] - _r["or_10pp"]]],
-            fmt=_fmt, color=_r["color"], markerfacecolor=_fill,
-            markersize=10, capsize=6, linewidth=2, capthick=2,
-            markeredgewidth=2,
-        )
-        _pstr = "p < 0.001" if _r["pval"] < 0.001 else f"p = {_r['pval']:.3f}"
-        _ax_a.text(
-            _r["ci_high"] + 0.02, _r["y"],
-            f"  {_r['or_10pp']:.2f} [{_r['ci_low']:.2f}\u2013{_r['ci_high']:.2f}], {_pstr}",
-            va="center", fontsize=9,
-        )
-    _ax_a.axvline(1, color="grey", linestyle="--", linewidth=1, alpha=0.7)
-    _ax_a.set_yticks(_y_positions)
-    _ax_a.set_yticklabels(_y_labels, fontsize=10)
-    _ax_a.set_xlabel("Odds Ratio per 10pp Agreement Increase")
-    _ax_a.set_title("Multi-Site Concordance: Agreement Rate \u2192 Better CPC Outcome",
-                     fontsize=13, fontweight="bold")
     if _has_adjusted:
-        from matplotlib.lines import Line2D
+        # Compact layout: one row per site, unadjusted + adjusted share the row
+        _y_positions = []
+        _y_labels = []
+        _y_pos = 0
+        for _site in _seen_sites:
+            _site_rows = [r for r in _forest_rows if r["site"] == _site]
+            _site_label = _site_rows[0]["label"]
+            _y_labels.append(_site_label)
+            _y_positions.append(_y_pos)
+            _offset = 0.12  # vertical offset within the row
+            for _r in _site_rows:
+                if _r["model"] == "Unadjusted":
+                    _r["y"] = _y_pos - _offset
+                else:
+                    _r["y"] = _y_pos + _offset
+            _y_pos += 1
+
+        _fig_a, _ax_a = plt.subplots(figsize=(12, max(3, len(_seen_sites) * 1.4 + 1)))
+
+        for _r in _forest_rows:
+            _fmt = "o" if _r["model"] == "Unadjusted" else "D"
+            _fill = "white" if _r["model"] == "Unadjusted" else _r["color"]
+            _ms = 9 if _r["model"] == "Unadjusted" else 10
+            _ax_a.errorbar(
+                _r["or_10pp"], _r["y"],
+                xerr=[[_r["or_10pp"] - _r["ci_low"]], [_r["ci_high"] - _r["or_10pp"]]],
+                fmt=_fmt, color=_r["color"], markerfacecolor=_fill,
+                markersize=_ms, capsize=5, linewidth=1.8, capthick=1.8,
+                markeredgewidth=2,
+            )
+            _pstr = "p < 0.001" if _r["pval"] < 0.001 else f"p = {_r['pval']:.3f}"
+            _ax_a.text(
+                _r["ci_high"] + 0.01, _r["y"],
+                f" {_r['or_10pp']:.2f} [{_r['ci_low']:.2f}\u2013{_r['ci_high']:.2f}]",
+                va="center", fontsize=9,
+            )
+
+        _ax_a.axvline(1, color="grey", linestyle="--", linewidth=1, alpha=0.7)
+        _ax_a.set_yticks(_y_positions)
+        _ax_a.set_yticklabels(_y_labels, fontsize=11, fontweight="bold")
+        # Add light horizontal dividers between sites
+        for _yp in _y_positions[:-1]:
+            _ax_a.axhline(_yp + 0.5, color="#e0e0e0", linewidth=0.5)
+
         _legend_handles = [
             Line2D([0], [0], marker="o", color="grey", markerfacecolor="white",
-                   markersize=10, markeredgewidth=2, linestyle="None", label="Unadjusted"),
+                   markersize=9, markeredgewidth=2, linestyle="None", label="Unadjusted"),
             Line2D([0], [0], marker="D", color="grey", markerfacecolor="grey",
                    markersize=10, markeredgewidth=2, linestyle="None",
                    label="Adjusted (age, sex, SOFA)"),
         ]
-        _ax_a.legend(handles=_legend_handles, loc="lower right", fontsize=10)
+        _ax_a.legend(handles=_legend_handles, loc="upper left", fontsize=10,
+                     frameon=True, fancybox=True, shadow=False)
+    else:
+        # Fallback: unadjusted only (no adjusted data available)
+        _y_positions = list(range(len(_forest_rows)))
+        _y_labels = [r["label"] for r in _forest_rows]
+        for _i, _r in enumerate(_forest_rows):
+            _r["y"] = _i
+
+        _fig_a, _ax_a = plt.subplots(figsize=(10, max(3, len(_forest_rows) * 1.5 + 1)))
+        for _r in _forest_rows:
+            _ax_a.errorbar(
+                _r["or_10pp"], _r["y"],
+                xerr=[[_r["or_10pp"] - _r["ci_low"]], [_r["ci_high"] - _r["or_10pp"]]],
+                fmt="D", color=_r["color"],
+                markersize=10, capsize=6, linewidth=2, capthick=2,
+            )
+            _pstr = "p < 0.001" if _r["pval"] < 0.001 else f"p = {_r['pval']:.3f}"
+            _ax_a.text(
+                _r["ci_high"] + 0.02, _r["y"],
+                f"  {_r['or_10pp']:.2f} [{_r['ci_low']:.2f}\u2013{_r['ci_high']:.2f}], {_pstr}",
+                va="center", fontsize=10,
+            )
+        _ax_a.axvline(1, color="grey", linestyle="--", linewidth=1, alpha=0.7)
+        _ax_a.set_yticks(_y_positions)
+        _ax_a.set_yticklabels(_y_labels, fontsize=11)
+
+    _ax_a.set_xlabel("Odds Ratio per 10pp Agreement Increase", fontsize=11)
+    _ax_a.set_title("Multi-Site Concordance: Agreement Rate \u2192 Better CPC Outcome",
+                     fontsize=13, fontweight="bold")
     _ax_a.invert_yaxis()
     _fig_a.tight_layout()
     _forest_uri = fig_to_base64(_fig_a)
@@ -612,6 +653,73 @@ def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site
         {"".join(_summary_rows)}
     </table>"""
 
+    # ── Concordance Summary Table (Unadjusted vs Adjusted) ──
+    _conc_rows = []
+    for _site in site_names:
+        _label = SITE_LABELS.get(_site, _site.upper())
+        _meta = site_data[_site].get("ext_val_metadata") or {}
+        _coef = site_data[_site].get("ext_val_coef")
+        _adj_coef = site_data[_site].get("ext_val_adjusted_coef")
+
+        _n = f"{_meta.get('n_patients', 'N/A'):,}" if _meta else "N/A"
+        _agree = f"{_meta.get('overall_agreement', 0):.1%}" if _meta else "N/A"
+
+        # Unadjusted
+        if _coef is not None and len(_coef) > 0:
+            _r = _coef.iloc[0]
+            _unadj_or = f"{_r['or_10pp']:.2f} [{_r['or_10pp_ci_low']:.2f}\u2013{_r['or_10pp_ci_high']:.2f}]"
+            _unadj_p = "< 0.001" if float(_r["p_value"]) < 0.001 else f"{float(_r['p_value']):.3f}"
+        else:
+            _unadj_or = "N/A"
+            _unadj_p = "N/A"
+
+        # Adjusted (core)
+        if _adj_coef is not None and len(_adj_coef) > 0:
+            _m2 = _adj_coef[
+                (_adj_coef["term"] == "agreement_rate")
+                & (_adj_coef["model"] == "M2: Adjusted (core)")
+            ]
+            if len(_m2) > 0:
+                _r2 = _m2.iloc[0]
+                _adj_or = f"{_r2['or_10pp']:.2f} [{_r2['or_10pp_ci_low']:.2f}\u2013{_r2['or_10pp_ci_high']:.2f}]"
+                _adj_p = "< 0.001" if float(_r2["p_value"]) < 0.001 else f"{float(_r2['p_value']):.3f}"
+            else:
+                _adj_or = "\u2014"
+                _adj_p = "\u2014"
+        else:
+            _adj_or = "\u2014"
+            _adj_p = "\u2014"
+
+        _conc_rows.append(f"""<tr>
+            <td><strong>{_label}</strong></td>
+            <td>{_n}</td>
+            <td>{_agree}</td>
+            <td>{_unadj_or}</td>
+            <td>{_unadj_p}</td>
+            <td>{_adj_or}</td>
+            <td>{_adj_p}</td>
+        </tr>""")
+
+    _concordance_table = f"""
+    <table class="data-table">
+        <tr>
+            <th rowspan="2">Site</th>
+            <th rowspan="2">N Patients</th>
+            <th rowspan="2">Agreement</th>
+            <th colspan="2" style="text-align:center; border-bottom:2px solid #fff;">Unadjusted</th>
+            <th colspan="2" style="text-align:center; border-bottom:2px solid #fff;">Adjusted (age, sex, SOFA)</th>
+        </tr>
+        <tr>
+            <th>OR/10pp [95% CI]</th><th>p</th>
+            <th>OR/10pp [95% CI]</th><th>p</th>
+        </tr>
+        {"".join(_conc_rows)}
+    </table>
+    <p style="font-size: 11px; color: #666; margin-top: 4px;">
+        OR/10pp = odds ratio per 10 percentage-point increase in RL-clinician agreement.
+        Adjusted model controls for age at admission, sex, and admission SOFA score (first 24h).
+    </p>"""
+
     # ── CONSORT Flow Table ──
     _consort_counters = [
         ("1_all_cardiac_arrest_patients", "All cardiac arrest patients"),
@@ -693,6 +801,7 @@ def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site
     _t1_exclude_levels = {
         "Race": {"american indian or alaska native", "native hawaiian or other pacific islander", "other", "unknown"},
         "Ethnicity": {"unknown"},
+        "Sex": {"unknown"},
     }
 
     def _format_stat(row):
@@ -817,6 +926,9 @@ def _(combined_figures, logger, mo, np, pd, site_data, site_names, training_site
 
         <h3>Concordance OR Forest Plot (per 10pp Agreement Increase)</h3>
         {_img(combined_figures.get("forest_plot"), "Multi-Site Forest Plot", "90%")}
+
+        <h3>Concordance Summary</h3>
+        {_concordance_table}
 
         <h3>Agreement-Outcome Relationship</h3>
         {_img(combined_figures.get("agreement_outcome"), "Agreement-Outcome", "90%")}
