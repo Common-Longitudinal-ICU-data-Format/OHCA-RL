@@ -120,20 +120,13 @@ def _(mo, out_dir, pd):
     # Filter to vasopressor patients only
     df = df.query("ever_vaso == 1").copy()
 
-    # ── Remap action encoding ──
-    # KC pipeline    : 0=Stay, 1=Increase, 2=Decrease, 3=Stop
-    # Yikuan's's code: 0=Increase, 1=Decrease, 2=Stop, 3=Stay
-    ACTION_REMAP = {0: 3, 1: 0, 2: 1, 3: 2}
-    df["action"] = df["action"].map(ACTION_REMAP)
-
     n_patients = df.hospitalization_id.nunique()
     n_rows = len(df)
     mo.md(
         f"**Data loaded:** {n_patients:,} patients, {n_rows:,} hourly rows\n\n"
-        f"Action encoding remapped: pipeline→ new format "
-        f"(0=Increase, 1=Decrease, 2=Stop, 3=Stay)"
+        f"Action encoding: 0=None, 1=Low, 2=Medium, 3=High (absolute NEE dose level at t+1)"
     )
-    return ACTION_REMAP, df
+    return df
 
 
 @app.cell
@@ -294,17 +287,18 @@ def _(df_feat, mo, np):
     # ── Reward computation  ──
     def compute_rewards(df_in, cpc_map=None):
         """
-        Add reward_intermediate, reward_terminal, and reward columns.
+        Forward-looking reward: r(t) measures the consequence of action a(t)
+        using clinical values at t+1 — consistent with standard RL4H MDP convention.
 
-        Intermediate reward:
+        Intermediate reward (non-terminal rows):
             r_t =
-                1.0 * tanh((clip(MAP_t, 55, 75) - 65) / 10)
-              + 0.5 * tanh((Lactate_{t-1} - Lactate_t) / 2)
-              - 0.2 * tanh(NEE_t / 0.2)
+                1.0 * tanh((clip(MAP_{t+1}, 55, 75) - 65) / 10)
+              + 0.5 * tanh((Lactate_t - Lactate_{t+1}) / 2)
+              - 0.2 * tanh(NEE_{t+1} / 0.2)
 
         Then center reward_intermediate to mean 0.
 
-        Terminal reward:
+        Terminal reward (last row per patient, no t+1):
             CPC1_2 -> +100
             CPC3   -> +40
             CPC4   -> -40
@@ -320,26 +314,27 @@ def _(df_feat, mo, np):
 
         df_out = df_in.sort_values(["hospitalization_id", "time_bucket"]).copy()
 
-        # previous lactate within each hospitalization
-        lactate_prev = df_out.groupby("hospitalization_id")["lab_lactate"].shift(1)
-        lactate_prev = lactate_prev.fillna(df_out["lab_lactate"])
+        grp = df_out.groupby("hospitalization_id")
+        map_next = grp["vital_map"].shift(-1)
+        lactate_next = grp["lab_lactate"].shift(-1)
+        nee_next = grp["med_cont_nee"].shift(-1)
 
-        # clip MAP so reward peaks around 65-75
-        map_clipped = np.clip(df_out["vital_map"], 55.0, 75.0)
+        # Non-terminal rows have a valid t+1; terminal rows get only the terminal reward
+        has_next = ~map_next.isna()
+        map_next_clipped = np.clip(map_next, 55.0, 75.0)
 
-        # intermediate reward
-        df_out["reward_intermediate"] = (
-            1.0 * np.tanh((map_clipped - 65.0) / 10.0)
-            + 0.5 * np.tanh((lactate_prev - df_out["lab_lactate"]) / 2.0)
-            - 0.2 * np.tanh(df_out["med_cont_nee"] / 0.2)
+        df_out["reward_intermediate"] = 0.0
+        df_out.loc[has_next, "reward_intermediate"] = (
+            1.0 * np.tanh((map_next_clipped[has_next] - 65.0) / 10.0)
+            + 0.5 * np.tanh((df_out.loc[has_next, "lab_lactate"] - lactate_next[has_next]) / 2.0)
+            - 0.2 * np.tanh(nee_next[has_next] / 0.2)
         )
 
-        # center intermediate reward
-        df_out["reward_intermediate"] = (
-            df_out["reward_intermediate"] - df_out["reward_intermediate"].mean()
-        )
+        # Center over non-terminal rows only
+        _mean = df_out.loc[has_next, "reward_intermediate"].mean()
+        df_out.loc[has_next, "reward_intermediate"] -= _mean
 
-        # terminal reward only on last row of each hospitalization
+        # Terminal reward on last row of each hospitalization
         df_out["reward_terminal"] = 0.0
         is_terminal = (
             df_out.groupby("hospitalization_id")["time_bucket"].transform("max")
@@ -349,7 +344,6 @@ def _(df_feat, mo, np):
             df_out.loc[is_terminal, "cpc"].map(cpc_map).fillna(0.0)
         )
 
-        # total reward
         df_out["reward"] = df_out["reward_intermediate"] + df_out["reward_terminal"]
 
         return df_out
@@ -357,15 +351,15 @@ def _(df_feat, mo, np):
     df_rewards = compute_rewards(df_feat)
 
     mo.md(
-        f"**Rewards computed.**\n\n"
+        f"**Rewards computed (forward-looking: r(t) uses MAP/lactate/NEE at t+1).**\n\n"
         f"- Intermediate reward mean: {df_rewards['reward_intermediate'].mean():.4f} "
         f"(should be ~0 after centering)\n"
         f"- Terminal reward: applied to {(df_rewards['reward_terminal'] != 0).sum():,} terminal rows\n"
-        f"- Action distribution (remapped):\n"
-        f"  - 0 (Increase): {(df_rewards['action'] == 0).sum():,}\n"
-        f"  - 1 (Decrease): {(df_rewards['action'] == 1).sum():,}\n"
-        f"  - 2 (Stop): {(df_rewards['action'] == 2).sum():,}\n"
-        f"  - 3 (Stay): {(df_rewards['action'] == 3).sum():,}"
+        f"- Action distribution:\n"
+        f"  - 0 (None):   {(df_rewards['action'] == 0).sum():,}\n"
+        f"  - 1 (Low):    {(df_rewards['action'] == 1).sum():,}\n"
+        f"  - 2 (Medium): {(df_rewards['action'] == 2).sum():,}\n"
+        f"  - 3 (High):   {(df_rewards['action'] == 3).sum():,}"
     )
     return (df_rewards,)
 
@@ -477,25 +471,23 @@ def _(
     torch,
 ):
     # ── Action constants  ──
-    ACTION_INCREASE = 0
-    ACTION_DECREASE = 1
-    ACTION_STOP = 2
-    ACTION_STAY = 3
+    ACTION_NONE = 0
+    ACTION_LOW = 1
+    ACTION_MEDIUM = 2
+    ACTION_HIGH = 3
 
     # ── Action mask  ──
-    def build_action_mask(map_t, nee_t, nee_min=0.0, nee_max=1.1):
+    def build_action_mask(map_t):
         """
-        Return mask for [increase, decrease, stop, stay].
-        Mask logic uses RAW clinical values.
+        Return mask for [none, low, medium, high] (absolute NEE dose level).
+        MAP-based clinical constraints:
+          MAP < 55 (hypotension): force vasopressor — disallow none/low
+          MAP > 90 (hypertension): disallow high
         """
-        if nee_t <= nee_min:
-            return np.array([1, 0, 0, 1], dtype=np.int8)
         if map_t < 55:
-            return np.array([1, 0, 0, 1], dtype=np.int8)
+            return np.array([0, 0, 1, 1], dtype=np.int8)
         if map_t > 90:
-            return np.array([0, 1, 1, 1], dtype=np.int8)
-        if nee_t >= nee_max:
-            return np.array([0, 1, 0, 1], dtype=np.int8)
+            return np.array([1, 1, 1, 0], dtype=np.int8)
         return np.array([1, 1, 1, 1], dtype=np.int8)
 
     # ── Transition builder ──
@@ -503,8 +495,7 @@ def _(
         df_state, df_mask_raw, feats,
         reward_col="reward", action_col="action",
         id_col="hospitalization_id", time_col="time_bucket",
-        raw_nee_col="med_cont_nee", raw_map_col="vital_map",
-        nee_min=0.0, nee_max=1.1,
+        raw_map_col="vital_map",
     ):
         sort_cols = [id_col, time_col]
         df_state = df_state.sort_values(sort_cols).copy()
@@ -529,24 +520,12 @@ def _(
         )
 
         raw_map = df_mask_raw[raw_map_col].to_numpy()
-        raw_nee = df_mask_raw[raw_nee_col].to_numpy()
-
         next_raw_map = (
             df_mask_raw.groupby(id_col)[raw_map_col].shift(-1).fillna(0.0).to_numpy()
         )
-        next_raw_nee = (
-            df_mask_raw.groupby(id_col)[raw_nee_col].shift(-1).fillna(0.0).to_numpy()
-        )
 
-        masks = np.stack([
-            build_action_mask(map_t=m, nee_t=n, nee_min=nee_min, nee_max=nee_max)
-            for m, n in zip(raw_map, raw_nee)
-        ]).astype(np.int8)
-
-        next_masks = np.stack([
-            build_action_mask(map_t=m, nee_t=n, nee_min=nee_min, nee_max=nee_max)
-            for m, n in zip(next_raw_map, next_raw_nee)
-        ]).astype(np.int8)
+        masks = np.stack([build_action_mask(m) for m in raw_map]).astype(np.int8)
+        next_masks = np.stack([build_action_mask(m) for m in next_raw_map]).astype(np.int8)
 
         next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1], dtype=np.int8)
 
@@ -569,14 +548,14 @@ def _(
 
         mask_block = pd.DataFrame(
             {
-                "mask_increase": masks[:, ACTION_INCREASE],
-                "mask_decrease": masks[:, ACTION_DECREASE],
-                "mask_stop": masks[:, ACTION_STOP],
-                "mask_stay": masks[:, ACTION_STAY],
-                "next_mask_increase": next_masks[:, ACTION_INCREASE],
-                "next_mask_decrease": next_masks[:, ACTION_DECREASE],
-                "next_mask_stop": next_masks[:, ACTION_STOP],
-                "next_mask_stay": next_masks[:, ACTION_STAY],
+                "mask_none": masks[:, ACTION_NONE],
+                "mask_low": masks[:, ACTION_LOW],
+                "mask_medium": masks[:, ACTION_MEDIUM],
+                "mask_high": masks[:, ACTION_HIGH],
+                "next_mask_none": next_masks[:, ACTION_NONE],
+                "next_mask_low": next_masks[:, ACTION_LOW],
+                "next_mask_medium": next_masks[:, ACTION_MEDIUM],
+                "next_mask_high": next_masks[:, ACTION_HIGH],
             },
             index=df_state.index,
         )
@@ -588,8 +567,8 @@ def _(
     def extract_numpy_batches(transition_df, feats, action_col="action", reward_col="reward"):
         state_cols = [f"s_{c}" for c in feats]
         next_state_cols = [f"ns_{c}" for c in feats]
-        mask_cols = ["mask_increase", "mask_decrease", "mask_stop", "mask_stay"]
-        next_mask_cols = ["next_mask_increase", "next_mask_decrease", "next_mask_stop", "next_mask_stay"]
+        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high"]
+        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high"]
         batch = {
             "states": transition_df[state_cols].to_numpy(dtype=np.float32),
             "actions": transition_df[action_col].to_numpy(dtype=np.int64),
@@ -644,13 +623,11 @@ def _(
     transition_train = build_transition_dataframe(
         df_state=df_train_proc, df_mask_raw=df_train_raw,
         feats=state_features, reward_col="reward", action_col="action",
-        nee_min=0.0, nee_max=1.1,
     )
 
     transition_test = build_transition_dataframe(
         df_state=df_test_proc, df_mask_raw=df_test_raw,
         feats=state_features, reward_col="reward", action_col="action",
-        nee_min=0.0, nee_max=1.1,
     )
 
     train_batch = extract_numpy_batches(
@@ -1303,7 +1280,6 @@ def _(df_test_raw, mo, np, pd, test_pred, training_dir, transition_test):
 
 @app.cell
 def _(
-    ACTION_REMAP,
     checkpoint_dir,
     json,
     mo,
@@ -1323,35 +1299,28 @@ def _(
         if _src.exists():
             shutil.copy2(_src, _dst)
 
-    # Save action remap for reference
-    with open(training_dir / "action_remap.json", "w") as _f:
-        json.dump(
-            {
-                "pipeline_to_new": {str(k): int(v) for k, v in ACTION_REMAP.items()},
-                "new_encoding": {
-                    "0": "increase",
-                    "1": "decrease",
-                    "2": "stop",
-                    "3": "stay",
-                },
-                "pipeline_encoding": {
-                    "0": "stay",
-                    "1": "increase",
-                    "2": "decrease",
-                    "3": "stop",
-                },
-            },
-            _f,
-            indent=2,
-        )
+    # Save action encoding for reference by external sites
+    _action_encoding = {
+        "0": "none",
+        "1": "low",
+        "2": "medium",
+        "3": "high",
+        "description": "Absolute NEE dose level at t+1 (forward-looking MDP action)",
+    }
+    with open(training_dir / "action_encoding.json", "w") as _f:
+        json.dump(_action_encoding, _f, indent=2)
+    shutil.copy2(training_dir / "action_encoding.json", shared_dir / "action_encoding.json")
 
-    shutil.copy2(training_dir / "action_remap.json", shared_dir / "action_remap.json")
+    # Copy NEE dose cutoffs so external sites bin consistently
+    _cutoffs_src = training_dir.parent / "output/intermediate/nee_dose_cutoffs.json"
+    if _cutoffs_src.exists():
+        shutil.copy2(_cutoffs_src, shared_dir / "nee_dose_cutoffs.json")
 
     mo.md(
         f"**Artifacts copied to `shared/` for multi-site exchange.**\n\n"
         f"Files:\n"
         + "\n".join(f"- `{dst.name}`" for dst in _files_to_copy.values())
-        + "\n- `action_remap.json`"
+        + "\n- `action_encoding.json`\n- `nee_dose_cutoffs.json`"
     )
     return
 
@@ -1430,7 +1399,7 @@ def _(
 
     # Standardization artifacts (for other sites to download)
     for _fname in ["best_model.pt", "preprocessor.json", "state_features.json",
-                    "training_config.json", "action_remap.json"]:
+                    "training_config.json", "action_encoding.json", "nee_dose_cutoffs.json"]:
         _src = shared_dir / _fname
         if _src.exists():
             shutil.copy2(_src, _std_dir / _fname)

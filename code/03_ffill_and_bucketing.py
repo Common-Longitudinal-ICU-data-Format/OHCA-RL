@@ -792,80 +792,86 @@ def _(
     return (bucketed_df,)
 
 
-# ── Cell 6: Action Inference (NEE-based) ─────────────────────────────────
+# ── Cell 6: Action Inference (NEE-based, absolute dose level) ────────────
 @app.cell
-def _(bucketed_df, logger, mo, np, ohca_config):
-    _tol = ohca_config["action_inference"]["nee_change_tolerance"]  # 0.03
-    logger.info("Step 6: Action inference from NEE deltas (tolerance=%.3f)...", _tol)
+def _(bucketed_df, logger, mo, np, ohca_config, json, Path):
+    logger.info("Step 6: Action inference — absolute NEE dose level at t+1...")
 
     actioned_df = bucketed_df.copy()
 
-    # NEE at current and previous bucket (per patient)
-    _nee = actioned_df.groupby("hospitalization_id")["med_cont_nee"]
-    _nee_prev = _nee.shift(1)
-    _delta_nee = actioned_df["med_cont_nee"] - _nee_prev
-
-    # Action encoding:
-    #   0 = stay     (|delta| < tolerance)
-    #   1 = increase (delta >= tolerance, OR NEE went from 0 to >0)
-    #   2 = decrease (delta <= -tolerance, NEE still > 0)
-    #   3 = stop     (NEE drops to 0 from > 0)
-    _action = np.full(len(actioned_df), 0, dtype=np.int8)  # default: stay
-
-    _nee_cur = actioned_df["med_cont_nee"]
-    _nee_lag = _nee_prev
-
-    # Increase: NEE went up by >= tolerance (includes start: 0 → >0)
-    _action = np.where(_delta_nee >= _tol, 1, _action)
-
-    # Decrease: NEE went down by >= tolerance, but NEE still > 0
-    _action = np.where(
-        (_delta_nee <= -_tol) & (_nee_cur > 0),
-        2, _action,
+    # Action a(t) = absolute NEE dose level the clinician sets at t+1.
+    # This gives forward-looking (t → t+1) MDP semantics: the agent observes
+    # state s(t) and selects the dose level that will be in effect at t+1.
+    # Encoding: 0=None, 1=Low, 2=Medium, 3=High
+    _nee_next = (
+        actioned_df.groupby("hospitalization_id")["med_cont_nee"].shift(-1)
     )
 
-    # Stop: NEE was > 0, now == 0
-    _action = np.where(
-        (_nee_lag > 0) & (_nee_cur == 0),
-        3, _action,
-    )
+    # Derive empirical tertile cutoffs from NEE>0 rows (pooled across all patients).
+    # "None" is exactly NEE==0; Low/Medium/High split the on-vasopressor distribution.
+    _nee_on = actioned_df.loc[actioned_df["med_cont_nee"] > 0, "med_cont_nee"]
+    _low_max = float(np.percentile(_nee_on, 33.3))
+    _medium_max = float(np.percentile(_nee_on, 66.7))
 
-    # First bucket per patient: no previous state → stay (0)
-    _first_bucket = _nee_lag.isna()
-    _action = np.where(_first_bucket, 0, _action)
+    cutoffs = {"none_max": 0.0, "low_max": _low_max, "medium_max": _medium_max}
+    logger.info("NEE cutoffs: none≤0, low≤%.4f, medium≤%.4f, high>%.4f",
+                _low_max, _medium_max, _medium_max)
 
-    actioned_df["action"] = _action
+    # Save cutoffs so external-validation sites use identical bins
+    _out_dir = Path(ohca_config.get("output_dir", "output/intermediate"))
+    _shared_dir = Path("shared")
+    for _d in [_out_dir, _shared_dir]:
+        _d.mkdir(parents=True, exist_ok=True)
+        with open(_d / "nee_dose_cutoffs.json", "w") as _f:
+            json.dump(cutoffs, _f, indent=2)
 
-    # Log distribution
+    # Bin NEE(t+1) into 0/1/2/3; last bucket per patient has no t+1 → drop
+    def _bin_nee(nee):
+        if nee == 0.0:
+            return 0  # None
+        if nee <= _low_max:
+            return 1  # Low
+        if nee <= _medium_max:
+            return 2  # Medium
+        return 3      # High
+
+    _action_raw = _nee_next.map(lambda x: _bin_nee(x) if not np.isnan(x) else np.nan)
+
+    # Drop last bucket per patient (no observable t+1 action)
+    actioned_df["action"] = _action_raw
+    actioned_df = actioned_df.dropna(subset=["action"]).copy()
+    actioned_df["action"] = actioned_df["action"].astype(np.int8)
+
     _action_counts = actioned_df["action"].value_counts().sort_index()
-    _action_labels = {0: "stay", 1: "increase", 2: "decrease", 3: "stop"}
+    _action_labels = {0: "none", 1: "low", 2: "medium", 3: "high"}
     _action_table = "\n".join(
         f"    {k} ({_action_labels[k]}): {v:,} ({v / len(actioned_df) * 100:.1f}%)"
         for k, v in _action_counts.items()
     )
     logger.info("Action distribution:\n%s", _action_table)
 
-    # Patients who ever had vasopressors
     _ever_vaso = actioned_df.groupby("hospitalization_id")["med_cont_nee"].max()
     _n_vaso_patients = (_ever_vaso > 0).sum()
     _n_total = len(_ever_vaso)
 
     mo.md(f"""
-    ### Action Inference (NEE-based)
+    ### Action Inference (absolute NEE dose level at t+1)
 
     | Setting | Value |
     |---------|-------|
-    | **NEE change tolerance** | {_tol} mcg/kg/min |
+    | **None threshold** | NEE = 0 mcg/kg/min |
+    | **Low/Medium cutoff** | {_low_max:.4f} mcg/kg/min (33rd pctile of NEE>0) |
+    | **Medium/High cutoff** | {_medium_max:.4f} mcg/kg/min (67th pctile of NEE>0) |
     | **Patients with any vasopressors** | {_n_vaso_patients:,} / {_n_total:,} ({_n_vaso_patients / _n_total * 100:.1f}%) |
 
     | Action | Label | Count | % |
     |--------|-------|-------|---|
-    | 0 | stay | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
-    | 1 | increase | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
-    | 2 | decrease | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
-    | 3 | stop | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
+    | 0 | none | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
+    | 1 | low | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
+    | 2 | medium | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
+    | 3 | high | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
     """)
-    return (actioned_df,)
+    return (actioned_df, cutoffs)
 
 
 # ── Cell 7: Derived Booleans & Reward Variables ──────────────────────────

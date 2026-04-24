@@ -74,9 +74,9 @@ def _(mo, json, shared_dir):
     with open(shared_dir / "training_config.json") as _f:
         ext_training_config = json.load(_f)
 
-    # ── Load action remap info ──
-    with open(shared_dir / "action_remap.json") as _f:
-        ext_action_remap = json.load(_f)
+    # ── Load action encoding info ──
+    with open(shared_dir / "action_encoding.json") as _f:
+        ext_action_encoding = json.load(_f)
 
     mo.md(
         f"**External model artifacts loaded from `shared/`:**\n\n"
@@ -87,12 +87,12 @@ def _(mo, json, shared_dir):
         f"- Continuous features: {len(ext_preprocessor['continuous_features'])}"
     )
 
-    return ext_preprocessor, ext_state_features, ext_training_config, ext_action_remap
+    return ext_preprocessor, ext_state_features, ext_training_config, ext_action_encoding
 
 
 # ── Cell 2: Load Local Data & Feature Engineering ────────────────────
 @app.cell
-def _(mo, np, pd, out_dir, ext_action_remap):
+def _(mo, np, pd, out_dir, ext_action_encoding):
     # Load local bucketed data and hospitalization summary
     _bucketed_df = pd.read_parquet(out_dir / "wide_df_bucketed.parquet")
     hosp_summary = pd.read_parquet(out_dir / "hospitalization_summary.parquet")
@@ -125,10 +125,7 @@ def _(mo, np, pd, out_dir, ext_action_remap):
 
     # Filter to vasopressor patients
     local_df = local_df.query("ever_vaso == 1").copy()
-
-    # Remap actions to PI's encoding
-    _remap = {int(k): int(v) for k, v in ext_action_remap["pipeline_to_new"].items()}
-    local_df["action"] = local_df["action"].map(_remap)
+    # Action encoding is already consistent (0=None,1=Low,2=Medium,3=High) from step 03
 
     # ── Respiratory mode dummies ──
     def build_resp_mode_dummies(df_in):
@@ -266,29 +263,25 @@ def _(
     mo, np, pd, torch, Dataset, DataLoader,
     local_df_proc, local_df_raw, ext_state_features,
 ):
-    # Action constants (PI's encoding)
-    ACTION_INCREASE = 0
-    ACTION_DECREASE = 1
-    ACTION_STOP = 2
-    ACTION_STAY = 3
+    # Action encoding: 0=None, 1=Low, 2=Medium, 3=High (absolute NEE dose level)
+    ACTION_NONE = 0
+    ACTION_LOW = 1
+    ACTION_MEDIUM = 2
+    ACTION_HIGH = 3
 
-    def build_action_mask(map_t, nee_t, nee_min=0.0, nee_max=1.1):
-        if nee_t <= nee_min:
-            return np.array([1, 0, 0, 1], dtype=np.int8)
+    def build_action_mask(map_t):
+        """MAP-based mask for [none, low, medium, high]."""
         if map_t < 55:
-            return np.array([1, 0, 0, 1], dtype=np.int8)
+            return np.array([0, 0, 1, 1], dtype=np.int8)
         if map_t > 90:
-            return np.array([0, 1, 1, 1], dtype=np.int8)
-        if nee_t >= nee_max:
-            return np.array([0, 1, 0, 1], dtype=np.int8)
+            return np.array([1, 1, 1, 0], dtype=np.int8)
         return np.array([1, 1, 1, 1], dtype=np.int8)
 
     def build_transition_dataframe(
         df_state, df_mask_raw, feats,
         reward_col="reward", action_col="action",
         id_col="hospitalization_id", time_col="time_bucket",
-        raw_nee_col="med_cont_nee", raw_map_col="vital_map",
-        nee_min=0.0, nee_max=1.1,
+        raw_map_col="vital_map",
     ):
         sort_cols = [id_col, time_col]
         df_state = df_state.sort_values(sort_cols).copy()
@@ -310,19 +303,10 @@ def _(
         )
 
         raw_map = df_mask_raw[raw_map_col].to_numpy()
-        raw_nee = df_mask_raw[raw_nee_col].to_numpy()
         next_raw_map = df_mask_raw.groupby(id_col)[raw_map_col].shift(-1).fillna(0.0).to_numpy()
-        next_raw_nee = df_mask_raw.groupby(id_col)[raw_nee_col].shift(-1).fillna(0.0).to_numpy()
 
-        masks = np.stack([
-            build_action_mask(map_t=m, nee_t=n, nee_min=nee_min, nee_max=nee_max)
-            for m, n in zip(raw_map, raw_nee)
-        ]).astype(np.int8)
-
-        next_masks = np.stack([
-            build_action_mask(map_t=m, nee_t=n, nee_min=nee_min, nee_max=nee_max)
-            for m, n in zip(next_raw_map, next_raw_nee)
-        ]).astype(np.int8)
+        masks = np.stack([build_action_mask(m) for m in raw_map]).astype(np.int8)
+        next_masks = np.stack([build_action_mask(m) for m in next_raw_map]).astype(np.int8)
 
         next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1], dtype=np.int8)
 
@@ -341,14 +325,14 @@ def _(
         next_state_block.columns = [f"ns_{c}" for c in feats]
 
         mask_block = pd.DataFrame({
-            "mask_increase": masks[:, ACTION_INCREASE],
-            "mask_decrease": masks[:, ACTION_DECREASE],
-            "mask_stop": masks[:, ACTION_STOP],
-            "mask_stay": masks[:, ACTION_STAY],
-            "next_mask_increase": next_masks[:, ACTION_INCREASE],
-            "next_mask_decrease": next_masks[:, ACTION_DECREASE],
-            "next_mask_stop": next_masks[:, ACTION_STOP],
-            "next_mask_stay": next_masks[:, ACTION_STAY],
+            "mask_none": masks[:, ACTION_NONE],
+            "mask_low": masks[:, ACTION_LOW],
+            "mask_medium": masks[:, ACTION_MEDIUM],
+            "mask_high": masks[:, ACTION_HIGH],
+            "next_mask_none": next_masks[:, ACTION_NONE],
+            "next_mask_low": next_masks[:, ACTION_LOW],
+            "next_mask_medium": next_masks[:, ACTION_MEDIUM],
+            "next_mask_high": next_masks[:, ACTION_HIGH],
         }, index=df_state.index)
 
         out = pd.concat([base_df, state_block, next_state_block, mask_block], axis=1)
@@ -357,8 +341,8 @@ def _(
     def extract_numpy_batches(transition_df, feats, action_col="action", reward_col="reward"):
         state_cols = [f"s_{c}" for c in feats]
         next_state_cols = [f"ns_{c}" for c in feats]
-        mask_cols = ["mask_increase", "mask_decrease", "mask_stop", "mask_stay"]
-        next_mask_cols = ["next_mask_increase", "next_mask_decrease", "next_mask_stop", "next_mask_stay"]
+        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high"]
+        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high"]
         batch = {
             "states": transition_df[state_cols].to_numpy(dtype=np.float32),
             "actions": transition_df[action_col].to_numpy(dtype=np.int64),
@@ -398,7 +382,6 @@ def _(
     transition_all = build_transition_dataframe(
         df_state=local_df_proc, df_mask_raw=local_df_raw,
         feats=ext_state_features, reward_col="reward", action_col="action",
-        nee_min=0.0, nee_max=1.1,
     )
 
     all_batch = extract_numpy_batches(
@@ -759,12 +742,12 @@ def _(
         "grid.alpha": 0.2,
     })
 
-    _ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
+    _ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High"}
     _ACTION_COLORS = {
-        0: "#E53935",   # red — escalation
-        1: "#42A5F5",   # blue — de-escalation
-        2: "#66BB6A",   # green — liberation
-        3: "#F8BBD0",   # light pink — maintenance
+        0: "#66BB6A",   # green — no vasopressor
+        1: "#FFF176",   # yellow — low dose
+        2: "#FFA726",   # orange — medium dose
+        3: "#E53935",   # red — high dose
     }
     _CPC_COLORS = {
         "CPC1_2": "#22c55e",

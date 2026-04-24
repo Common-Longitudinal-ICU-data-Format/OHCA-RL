@@ -64,12 +64,12 @@ def _():
         "emory": "Emory",
         "nu": "NU",
     }
-    ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
+    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High"}
     ACTION_COLORS = {
-        0: "#E53935",
-        1: "#42A5F5",
-        2: "#66BB6A",
-        3: "#F8BBD0",
+        0: "#66BB6A",   # green — no vasopressor
+        1: "#FFF176",   # yellow — low dose
+        2: "#FFA726",   # orange — medium dose
+        3: "#E53935",   # red — high dose
     }
 
     plt.rcParams.update({
