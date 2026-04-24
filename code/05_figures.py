@@ -73,8 +73,8 @@ def _():
     COLOR_SURV = "#2196F3"      # blue
     COLOR_DEAD = "#E53935"      # red
     COLOR_ALL = "#555555"       # grey
-    ACTION_COLORS = ["#66BB6A", "#FFF176", "#FFA726", "#E53935"]  # none, low, medium, high
-    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High"}
+    ACTION_COLORS = ["#66BB6A", "#FFF176", "#FFA726", "#E53935", "#B71C1C"]  # none, low, medium, high, very_high
+    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High", 4: "Very High"}
 
     # ── Helpers ──
     def plot_median_iqr(df, col, ax, color, label, time_col="time_bucket"):

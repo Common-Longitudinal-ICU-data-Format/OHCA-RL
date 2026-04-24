@@ -63,13 +63,14 @@ def _():
         "grid.alpha": 0.2,
     })
 
-    # ── Action colors (0=None, 1=Low, 2=Medium, 3=High — absolute NEE dose level) ──
-    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High"}
+    # ── Action colors (0=None…4=Very High — absolute NEE dose level) ──
+    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High", 4: "Very High"}
     ACTION_COLORS = {
         0: "#66BB6A",   # green — no vasopressor
         1: "#FFF176",   # yellow — low dose
         2: "#FFA726",   # orange — medium dose
         3: "#E53935",   # red — high dose
+        4: "#B71C1C",   # dark red — very high dose
     }
 
     # CPC endpoint colors

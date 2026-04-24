@@ -356,10 +356,11 @@ def _(df_feat, mo, np):
         f"(should be ~0 after centering)\n"
         f"- Terminal reward: applied to {(df_rewards['reward_terminal'] != 0).sum():,} terminal rows\n"
         f"- Action distribution:\n"
-        f"  - 0 (None):   {(df_rewards['action'] == 0).sum():,}\n"
-        f"  - 1 (Low):    {(df_rewards['action'] == 1).sum():,}\n"
-        f"  - 2 (Medium): {(df_rewards['action'] == 2).sum():,}\n"
-        f"  - 3 (High):   {(df_rewards['action'] == 3).sum():,}"
+        f"  - 0 (None):      {(df_rewards['action'] == 0).sum():,}\n"
+        f"  - 1 (Low):       {(df_rewards['action'] == 1).sum():,}\n"
+        f"  - 2 (Medium):    {(df_rewards['action'] == 2).sum():,}\n"
+        f"  - 3 (High):      {(df_rewards['action'] == 3).sum():,}\n"
+        f"  - 4 (Very High): {(df_rewards['action'] == 4).sum():,}"
     )
     return (df_rewards,)
 
@@ -475,20 +476,21 @@ def _(
     ACTION_LOW = 1
     ACTION_MEDIUM = 2
     ACTION_HIGH = 3
+    ACTION_VERY_HIGH = 4
 
     # ── Action mask  ──
     def build_action_mask(map_t):
         """
-        Return mask for [none, low, medium, high] (absolute NEE dose level).
+        Return mask for [none, low, medium, high, very_high] (absolute NEE dose level).
         MAP-based clinical constraints:
           MAP < 55 (hypotension): force vasopressor — disallow none/low
-          MAP > 90 (hypertension): disallow high
+          MAP > 90 (hypertension): disallow high/very_high
         """
         if map_t < 55:
-            return np.array([0, 0, 1, 1], dtype=np.int8)
+            return np.array([0, 0, 1, 1, 1], dtype=np.int8)
         if map_t > 90:
-            return np.array([1, 1, 1, 0], dtype=np.int8)
-        return np.array([1, 1, 1, 1], dtype=np.int8)
+            return np.array([1, 1, 1, 0, 0], dtype=np.int8)
+        return np.array([1, 1, 1, 1, 1], dtype=np.int8)
 
     # ── Transition builder ──
     def build_transition_dataframe(
@@ -527,7 +529,7 @@ def _(
         masks = np.stack([build_action_mask(m) for m in raw_map]).astype(np.int8)
         next_masks = np.stack([build_action_mask(m) for m in next_raw_map]).astype(np.int8)
 
-        next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1], dtype=np.int8)
+        next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1, 1], dtype=np.int8)
 
         base_df = pd.DataFrame(
             {
@@ -552,10 +554,12 @@ def _(
                 "mask_low": masks[:, ACTION_LOW],
                 "mask_medium": masks[:, ACTION_MEDIUM],
                 "mask_high": masks[:, ACTION_HIGH],
+                "mask_very_high": masks[:, ACTION_VERY_HIGH],
                 "next_mask_none": next_masks[:, ACTION_NONE],
                 "next_mask_low": next_masks[:, ACTION_LOW],
                 "next_mask_medium": next_masks[:, ACTION_MEDIUM],
                 "next_mask_high": next_masks[:, ACTION_HIGH],
+                "next_mask_very_high": next_masks[:, ACTION_VERY_HIGH],
             },
             index=df_state.index,
         )
@@ -567,8 +571,8 @@ def _(
     def extract_numpy_batches(transition_df, feats, action_col="action", reward_col="reward"):
         state_cols = [f"s_{c}" for c in feats]
         next_state_cols = [f"ns_{c}" for c in feats]
-        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high"]
-        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high"]
+        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high", "mask_very_high"]
+        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high", "next_mask_very_high"]
         batch = {
             "states": transition_df[state_cols].to_numpy(dtype=np.float32),
             "actions": transition_df[action_col].to_numpy(dtype=np.int64),
@@ -660,7 +664,7 @@ def _(
 def _(F, copy, nn, np, os, pd, torch):
     # ── Q-Network ──
     class QNetwork(nn.Module):
-        def __init__(self, state_dim_val, n_actions=4, hidden_dims=(256, 256), dropout=0.0):
+        def __init__(self, state_dim_val, n_actions=5, hidden_dims=(256, 256), dropout=0.0):
             super().__init__()
             h1, h2 = hidden_dims
             self.net = nn.Sequential(
@@ -684,7 +688,7 @@ def _(F, copy, nn, np, os, pd, torch):
 
     # ── Build DDQN components ──
     def build_ddqn_components(
-        state_dim_val, n_actions=4, hidden_dims=(256, 256),
+        state_dim_val, n_actions=5, hidden_dims=(256, 256),
         dropout=0.0, lr=1e-3, device="cpu",
     ):
         online_net = QNetwork(
@@ -825,7 +829,7 @@ def _(F, copy, nn, np, os, pd, torch):
     # ── Full training loop ──
     def train_ddqn(
         train_loader, test_loader, state_dim_val,
-        n_actions=4, hidden_dims=(256, 256), dropout=0.0,
+        n_actions=5, hidden_dims=(256, 256), dropout=0.0,
         lr=1e-3, gamma=0.99, n_epochs=50, target_update_every=500,
         grad_clip=5.0, device="cpu", checkpoint_dir_val="ddqn_checkpoints",
         checkpoint_every_epochs=5, min_training_epochs=20,
@@ -1084,7 +1088,7 @@ def _(
         train_loader=train_loader,
         test_loader=test_loader,
         state_dim_val=state_dim,
-        n_actions=4,
+        n_actions=5,
         hidden_dims=(256, 256),
         dropout=0.0,
         lr=1e-3,
@@ -1299,28 +1303,25 @@ def _(
         if _src.exists():
             shutil.copy2(_src, _dst)
 
-    # Save action encoding for reference by external sites
+    # Save action encoding for reference by external sites (fixed clinical cutoffs)
     _action_encoding = {
         "0": "none",
         "1": "low",
         "2": "medium",
         "3": "high",
+        "4": "very_high",
+        "cutoffs_mcg_kg_min": {"none": 0.0, "low_max": 0.05, "medium_max": 0.15, "high_max": 0.30},
         "description": "Absolute NEE dose level at t+1 (forward-looking MDP action)",
     }
     with open(training_dir / "action_encoding.json", "w") as _f:
         json.dump(_action_encoding, _f, indent=2)
     shutil.copy2(training_dir / "action_encoding.json", shared_dir / "action_encoding.json")
 
-    # Copy NEE dose cutoffs so external sites bin consistently
-    _cutoffs_src = training_dir.parent / "output/intermediate/nee_dose_cutoffs.json"
-    if _cutoffs_src.exists():
-        shutil.copy2(_cutoffs_src, shared_dir / "nee_dose_cutoffs.json")
-
     mo.md(
         f"**Artifacts copied to `shared/` for multi-site exchange.**\n\n"
         f"Files:\n"
         + "\n".join(f"- `{dst.name}`" for dst in _files_to_copy.values())
-        + "\n- `action_encoding.json`\n- `nee_dose_cutoffs.json`"
+        + "\n- `action_encoding.json`"
     )
     return
 
@@ -1399,7 +1400,7 @@ def _(
 
     # Standardization artifacts (for other sites to download)
     for _fname in ["best_model.pt", "preprocessor.json", "state_features.json",
-                    "training_config.json", "action_encoding.json", "nee_dose_cutoffs.json"]:
+                    "training_config.json", "action_encoding.json"]:
         _src = shared_dir / _fname
         if _src.exists():
             shutil.copy2(_src, _std_dir / _fname)

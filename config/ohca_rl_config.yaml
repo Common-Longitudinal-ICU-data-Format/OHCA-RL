@@ -322,16 +322,15 @@ outlier_ranges:
 action_inference:
   interval_minutes: 60
   encoding: absolute_dose_level   # action = NEE bin at t+1 (forward-looking MDP)
-  none_threshold: 0.0             # NEE == 0 → action 0 (None)
-  cutoff_method: empirical_tertiles  # low/medium/high split NEE>0 at 33rd/67th pctile
   time_window_hours: 120          # first vital to +120h
   med_ffill_trailing_hours: 4     # ffill non-zero meds up to 4h after last observation
 
-# Action encoding:
-#   0 = none    (NEE == 0)
-#   1 = low     (0 < NEE <= 33rd pctile of NEE>0)
-#   2 = medium  (33rd < NEE <= 67th pctile)
-#   3 = high    (NEE > 67th pctile)
+# Action encoding (fixed clinical cutoffs, mcg/kg/min NEE equivalent):
+#   0 = none      (NEE == 0)
+#   1 = low       (0    < NEE < 0.05)
+#   2 = medium    (0.05 ≤ NEE ≤ 0.15)
+#   3 = high      (0.15 < NEE ≤ 0.30)
+#   4 = very_high (NEE > 0.30)
 
 # ============================================================================
 # REWARD SIGNAL (Step 04)

@@ -263,19 +263,20 @@ def _(
     mo, np, pd, torch, Dataset, DataLoader,
     local_df_proc, local_df_raw, ext_state_features,
 ):
-    # Action encoding: 0=None, 1=Low, 2=Medium, 3=High (absolute NEE dose level)
+    # Action encoding: 0=None, 1=Low, 2=Medium, 3=High, 4=Very High (absolute NEE dose level)
     ACTION_NONE = 0
     ACTION_LOW = 1
     ACTION_MEDIUM = 2
     ACTION_HIGH = 3
+    ACTION_VERY_HIGH = 4
 
     def build_action_mask(map_t):
-        """MAP-based mask for [none, low, medium, high]."""
+        """MAP-based mask for [none, low, medium, high, very_high]."""
         if map_t < 55:
-            return np.array([0, 0, 1, 1], dtype=np.int8)
+            return np.array([0, 0, 1, 1, 1], dtype=np.int8)
         if map_t > 90:
-            return np.array([1, 1, 1, 0], dtype=np.int8)
-        return np.array([1, 1, 1, 1], dtype=np.int8)
+            return np.array([1, 1, 1, 0, 0], dtype=np.int8)
+        return np.array([1, 1, 1, 1, 1], dtype=np.int8)
 
     def build_transition_dataframe(
         df_state, df_mask_raw, feats,
@@ -308,7 +309,7 @@ def _(
         masks = np.stack([build_action_mask(m) for m in raw_map]).astype(np.int8)
         next_masks = np.stack([build_action_mask(m) for m in next_raw_map]).astype(np.int8)
 
-        next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1], dtype=np.int8)
+        next_masks[done.to_numpy() == 1] = np.array([1, 1, 1, 1, 1], dtype=np.int8)
 
         base_df = pd.DataFrame({
             id_col: df_state[id_col].to_numpy(),
@@ -329,10 +330,12 @@ def _(
             "mask_low": masks[:, ACTION_LOW],
             "mask_medium": masks[:, ACTION_MEDIUM],
             "mask_high": masks[:, ACTION_HIGH],
+            "mask_very_high": masks[:, ACTION_VERY_HIGH],
             "next_mask_none": next_masks[:, ACTION_NONE],
             "next_mask_low": next_masks[:, ACTION_LOW],
             "next_mask_medium": next_masks[:, ACTION_MEDIUM],
             "next_mask_high": next_masks[:, ACTION_HIGH],
+            "next_mask_very_high": next_masks[:, ACTION_VERY_HIGH],
         }, index=df_state.index)
 
         out = pd.concat([base_df, state_block, next_state_block, mask_block], axis=1)
@@ -341,8 +344,8 @@ def _(
     def extract_numpy_batches(transition_df, feats, action_col="action", reward_col="reward"):
         state_cols = [f"s_{c}" for c in feats]
         next_state_cols = [f"ns_{c}" for c in feats]
-        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high"]
-        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high"]
+        mask_cols = ["mask_none", "mask_low", "mask_medium", "mask_high", "mask_very_high"]
+        next_mask_cols = ["next_mask_none", "next_mask_low", "next_mask_medium", "next_mask_high", "next_mask_very_high"]
         batch = {
             "states": transition_df[state_cols].to_numpy(dtype=np.float32),
             "actions": transition_df[action_col].to_numpy(dtype=np.int64),
@@ -742,12 +745,13 @@ def _(
         "grid.alpha": 0.2,
     })
 
-    _ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High"}
+    _ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High", 4: "Very High"}
     _ACTION_COLORS = {
         0: "#66BB6A",   # green — no vasopressor
         1: "#FFF176",   # yellow — low dose
         2: "#FFA726",   # orange — medium dose
         3: "#E53935",   # red — high dose
+        4: "#B71C1C",   # dark red — very high dose
     }
     _CPC_COLORS = {
         "CPC1_2": "#22c55e",
@@ -893,7 +897,7 @@ def _(
     # ── Fig 5: Action Confusion Matrix ──
     _observed = ext_pred["observed_actions"]
     _predicted = ext_pred["pred_actions"]
-    _n_actions = 4
+    _n_actions = ext_training_config["n_actions"]
     _conf = np.zeros((_n_actions, _n_actions), dtype=int)
     for _o, _p in zip(_observed, _predicted):
         _conf[int(_o), int(_p)] += 1

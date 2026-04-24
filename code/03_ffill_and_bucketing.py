@@ -800,40 +800,23 @@ def _(bucketed_df, logger, mo, np, ohca_config, json, Path):
     actioned_df = bucketed_df.copy()
 
     # Action a(t) = absolute NEE dose level the clinician sets at t+1.
-    # This gives forward-looking (t → t+1) MDP semantics: the agent observes
-    # state s(t) and selects the dose level that will be in effect at t+1.
-    # Encoding: 0=None, 1=Low, 2=Medium, 3=High
+    # Forward-looking MDP: agent observes s(t) and picks the dose tier in effect at t+1.
+    # Fixed clinical cutoffs (mcg/kg/min NEE):
+    #   0 = None      (NEE == 0)
+    #   1 = Low       (0   < NEE < 0.05)
+    #   2 = Medium    (0.05 ≤ NEE ≤ 0.15)
+    #   3 = High      (0.15 < NEE ≤ 0.30)
+    #   4 = Very High (NEE > 0.30)
     _nee_next = (
         actioned_df.groupby("hospitalization_id")["med_cont_nee"].shift(-1)
     )
 
-    # Derive empirical tertile cutoffs from NEE>0 rows (pooled across all patients).
-    # "None" is exactly NEE==0; Low/Medium/High split the on-vasopressor distribution.
-    _nee_on = actioned_df.loc[actioned_df["med_cont_nee"] > 0, "med_cont_nee"]
-    _low_max = float(np.percentile(_nee_on, 33.3))
-    _medium_max = float(np.percentile(_nee_on, 66.7))
-
-    cutoffs = {"none_max": 0.0, "low_max": _low_max, "medium_max": _medium_max}
-    logger.info("NEE cutoffs: none≤0, low≤%.4f, medium≤%.4f, high>%.4f",
-                _low_max, _medium_max, _medium_max)
-
-    # Save cutoffs so external-validation sites use identical bins
-    _out_dir = Path(ohca_config.get("output_dir", "output/intermediate"))
-    _shared_dir = Path("shared")
-    for _d in [_out_dir, _shared_dir]:
-        _d.mkdir(parents=True, exist_ok=True)
-        with open(_d / "nee_dose_cutoffs.json", "w") as _f:
-            json.dump(cutoffs, _f, indent=2)
-
-    # Bin NEE(t+1) into 0/1/2/3; last bucket per patient has no t+1 → drop
     def _bin_nee(nee):
-        if nee == 0.0:
-            return 0  # None
-        if nee <= _low_max:
-            return 1  # Low
-        if nee <= _medium_max:
-            return 2  # Medium
-        return 3      # High
+        if nee == 0.0:   return 0  # None
+        if nee < 0.05:   return 1  # Low
+        if nee <= 0.15:  return 2  # Medium
+        if nee <= 0.30:  return 3  # High
+        return 4                   # Very High
 
     _action_raw = _nee_next.map(lambda x: _bin_nee(x) if not np.isnan(x) else np.nan)
 
@@ -843,7 +826,7 @@ def _(bucketed_df, logger, mo, np, ohca_config, json, Path):
     actioned_df["action"] = actioned_df["action"].astype(np.int8)
 
     _action_counts = actioned_df["action"].value_counts().sort_index()
-    _action_labels = {0: "none", 1: "low", 2: "medium", 3: "high"}
+    _action_labels = {0: "none", 1: "low", 2: "medium", 3: "high", 4: "very_high"}
     _action_table = "\n".join(
         f"    {k} ({_action_labels[k]}): {v:,} ({v / len(actioned_df) * 100:.1f}%)"
         for k, v in _action_counts.items()
@@ -857,21 +840,17 @@ def _(bucketed_df, logger, mo, np, ohca_config, json, Path):
     mo.md(f"""
     ### Action Inference (absolute NEE dose level at t+1)
 
-    | Setting | Value |
-    |---------|-------|
-    | **None threshold** | NEE = 0 mcg/kg/min |
-    | **Low/Medium cutoff** | {_low_max:.4f} mcg/kg/min (33rd pctile of NEE>0) |
-    | **Medium/High cutoff** | {_medium_max:.4f} mcg/kg/min (67th pctile of NEE>0) |
-    | **Patients with any vasopressors** | {_n_vaso_patients:,} / {_n_total:,} ({_n_vaso_patients / _n_total * 100:.1f}%) |
+    | Action | Label | NEE range (mcg/kg/min) | Count | % |
+    |--------|-------|------------------------|-------|---|
+    | 0 | none      | = 0            | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
+    | 1 | low       | (0, 0.05)      | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
+    | 2 | medium    | [0.05, 0.15]   | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
+    | 3 | high      | (0.15, 0.30]   | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
+    | 4 | very high | > 0.30         | {_action_counts.get(4, 0):,} | {_action_counts.get(4, 0) / len(actioned_df) * 100:.1f}% |
 
-    | Action | Label | Count | % |
-    |--------|-------|-------|---|
-    | 0 | none | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
-    | 1 | low | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
-    | 2 | medium | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
-    | 3 | high | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
+    **Patients with any vasopressors:** {_n_vaso_patients:,} / {_n_total:,} ({_n_vaso_patients / _n_total * 100:.1f}%)
     """)
-    return (actioned_df, cutoffs)
+    return (actioned_df,)
 
 
 # ── Cell 7: Derived Booleans & Reward Variables ──────────────────────────
