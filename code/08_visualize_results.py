@@ -123,10 +123,6 @@ def _(ext_val_dir, intermediate_dir, logger, mo, np, pd, training_dir):
     coef_summary = pd.read_csv(training_dir / "coef_summary.csv")
     bin_summary = pd.read_csv(training_dir / "bin_summary.csv")
 
-    with open(training_dir / "action_remap.json") as _f:
-        import json as _json
-        action_remap = _json.load(_f)
-
     # Test predictions for timelines and confusion matrix
     _pred_path = training_dir / "test_with_predictions.parquet"
     if _pred_path.exists():

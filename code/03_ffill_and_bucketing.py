@@ -807,37 +807,37 @@ def _(bucketed_df, logger, mo, np, ohca_config):
     _nee_cur = actioned_df["med_cont_nee"]
     _delta_nee = _nee_next - _nee_cur
 
-    # Action encoding:
-    #   0 = stay     (|delta| < tolerance)
-    #   1 = increase (delta >= tolerance, OR NEE goes from 0 to >0)
-    #   2 = decrease (delta <= -tolerance, NEE at t+1 still > 0)
-    #   3 = stop     (NEE at t > 0, NEE at t+1 == 0)
-    _action = np.full(len(actioned_df), 0, dtype=np.int8)  # default: stay
+    # Action encoding (matches Yikuan/training convention):
+    #   0 = increase (delta >= tolerance, OR NEE goes from 0 to >0)
+    #   1 = decrease (delta <= -tolerance, NEE at t+1 still > 0)
+    #   2 = stop     (NEE at t > 0, NEE at t+1 == 0)
+    #   3 = stay     (|delta| < tolerance)
+    _action = np.full(len(actioned_df), 3, dtype=np.int8)  # default: stay
 
     # Increase: NEE will go up by >= tolerance (includes start: 0 → >0)
-    _action = np.where(_delta_nee >= _tol, 1, _action)
+    _action = np.where(_delta_nee >= _tol, 0, _action)
 
     # Decrease: NEE will go down by >= tolerance, but NEE at t+1 still > 0
     _action = np.where(
         (_delta_nee <= -_tol) & (_nee_next > 0),
-        2, _action,
+        1, _action,
     )
 
     # Stop: NEE at t > 0, NEE at t+1 == 0
     _action = np.where(
         (_nee_cur > 0) & (_nee_next == 0),
-        3, _action,
+        2, _action,
     )
 
-    # Last bucket per patient: no next state → stay (0) — terminal
+    # Last bucket per patient: no next state → stay (3) — terminal
     _last_bucket = _nee_next.isna()
-    _action = np.where(_last_bucket, 0, _action)
+    _action = np.where(_last_bucket, 3, _action)
 
     actioned_df["action"] = _action
 
     # Log distribution
     _action_counts = actioned_df["action"].value_counts().sort_index()
-    _action_labels = {0: "stay", 1: "increase", 2: "decrease", 3: "stop"}
+    _action_labels = {0: "increase", 1: "decrease", 2: "stop", 3: "stay"}
     _action_table = "\n".join(
         f"    {k} ({_action_labels[k]}): {v:,} ({v / len(actioned_df) * 100:.1f}%)"
         for k, v in _action_counts.items()
@@ -859,10 +859,10 @@ def _(bucketed_df, logger, mo, np, ohca_config):
 
     | Action | Label | Count | % |
     |--------|-------|-------|---|
-    | 0 | stay | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
-    | 1 | increase | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
-    | 2 | decrease | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
-    | 3 | stop | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
+    | 0 | increase | {_action_counts.get(0, 0):,} | {_action_counts.get(0, 0) / len(actioned_df) * 100:.1f}% |
+    | 1 | decrease | {_action_counts.get(1, 0):,} | {_action_counts.get(1, 0) / len(actioned_df) * 100:.1f}% |
+    | 2 | stop | {_action_counts.get(2, 0):,} | {_action_counts.get(2, 0) / len(actioned_df) * 100:.1f}% |
+    | 3 | stay | {_action_counts.get(3, 0):,} | {_action_counts.get(3, 0) / len(actioned_df) * 100:.1f}% |
     """)
     return (actioned_df,)
 

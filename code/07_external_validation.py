@@ -74,10 +74,6 @@ def _(mo, json, shared_dir):
     with open(shared_dir / "training_config.json") as _f:
         ext_training_config = json.load(_f)
 
-    # ── Load action remap info ──
-    with open(shared_dir / "action_remap.json") as _f:
-        ext_action_remap = json.load(_f)
-
     mo.md(
         f"**External model artifacts loaded from `shared/`:**\n\n"
         f"- Training site: {ext_training_config.get('site_name', 'unknown')}\n"
@@ -87,12 +83,12 @@ def _(mo, json, shared_dir):
         f"- Continuous features: {len(ext_preprocessor['continuous_features'])}"
     )
 
-    return ext_preprocessor, ext_state_features, ext_training_config, ext_action_remap
+    return ext_preprocessor, ext_state_features, ext_training_config
 
 
 # ── Cell 2: Load Local Data & Feature Engineering ────────────────────
 @app.cell
-def _(mo, np, pd, out_dir, ext_action_remap):
+def _(mo, np, pd, out_dir):
     # Load local bucketed data and hospitalization summary
     _bucketed_df = pd.read_parquet(out_dir / "wide_df_bucketed.parquet")
     hosp_summary = pd.read_parquet(out_dir / "hospitalization_summary.parquet")
@@ -126,9 +122,8 @@ def _(mo, np, pd, out_dir, ext_action_remap):
     # Filter to vasopressor patients
     local_df = local_df.query("ever_vaso == 1").copy()
 
-    # Remap actions to PI's encoding
-    _remap = {int(k): int(v) for k, v in ext_action_remap["pipeline_to_new"].items()}
-    local_df["action"] = local_df["action"].map(_remap)
+    # Action encoding (set in 03_ffill_and_bucketing.py, matches training convention):
+    # 0=Increase, 1=Decrease, 2=Stop, 3=Stay — no remap needed
 
     # ── Respiratory mode dummies ──
     def build_resp_mode_dummies(df_in):

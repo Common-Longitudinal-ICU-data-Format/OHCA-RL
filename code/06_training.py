@@ -120,20 +120,15 @@ def _(mo, out_dir, pd):
     # Filter to vasopressor patients only
     df = df.query("ever_vaso == 1").copy()
 
-    # ── Remap action encoding ──
-    # KC pipeline    : 0=Stay, 1=Increase, 2=Decrease, 3=Stop
-    # Yikuan's's code: 0=Increase, 1=Decrease, 2=Stop, 3=Stay
-    ACTION_REMAP = {0: 3, 1: 0, 2: 1, 3: 2}
-    df["action"] = df["action"].map(ACTION_REMAP)
-
+    # Action encoding (set in 03_ffill_and_bucketing.py, matches training convention):
+    # 0=Increase, 1=Decrease, 2=Stop, 3=Stay
     n_patients = df.hospitalization_id.nunique()
     n_rows = len(df)
     mo.md(
         f"**Data loaded:** {n_patients:,} patients, {n_rows:,} hourly rows\n\n"
-        f"Action encoding remapped: pipeline→ new format "
-        f"(0=Increase, 1=Decrease, 2=Stop, 3=Stay)"
+        f"Action encoding: 0=Increase, 1=Decrease, 2=Stop, 3=Stay"
     )
-    return ACTION_REMAP, df
+    return (df,)
 
 
 @app.cell
@@ -627,12 +622,14 @@ def _(
             }
 
     # ── DataLoader builder ──
-    def build_dataloaders(train_batch, test_batch, batch_size=256, num_workers=0):
+    def build_dataloaders(train_batch, test_batch, batch_size=256, num_workers=0, seed=42):
         train_dataset = OfflineRLDataset(train_batch)
         test_dataset = OfflineRLDataset(test_batch)
+        _g = torch.Generator()
+        _g.manual_seed(seed)
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, drop_last=False,
+            num_workers=num_workers, drop_last=False, generator=_g,
         )
         test_loader = DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False,
@@ -1078,6 +1075,18 @@ def _(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Training on device: {device}")
 
+    # ── Reproducibility seed ──
+    import random
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set: {SEED}")
+
     # Training hyperparameters
     _training_config = {
         "site_name": site_name,
@@ -1096,6 +1105,7 @@ def _(
         "early_stopping": True,
         "early_stopping_patience": 8,
         "device": device,
+        "seed": SEED,
     }
 
     # Save training config
@@ -1303,7 +1313,6 @@ def _(df_test_raw, mo, np, pd, test_pred, training_dir, transition_test):
 
 @app.cell
 def _(
-    ACTION_REMAP,
     checkpoint_dir,
     json,
     mo,
@@ -1323,35 +1332,28 @@ def _(
         if _src.exists():
             shutil.copy2(_src, _dst)
 
-    # Save action remap for reference
-    with open(training_dir / "action_remap.json", "w") as _f:
+    # Save action encoding reference (no remap needed — pipeline uses training encoding directly)
+    with open(training_dir / "action_encoding.json", "w") as _f:
         json.dump(
             {
-                "pipeline_to_new": {str(k): int(v) for k, v in ACTION_REMAP.items()},
-                "new_encoding": {
+                "encoding": {
                     "0": "increase",
                     "1": "decrease",
                     "2": "stop",
                     "3": "stay",
-                },
-                "pipeline_encoding": {
-                    "0": "stay",
-                    "1": "increase",
-                    "2": "decrease",
-                    "3": "stop",
                 },
             },
             _f,
             indent=2,
         )
 
-    shutil.copy2(training_dir / "action_remap.json", shared_dir / "action_remap.json")
+    shutil.copy2(training_dir / "action_encoding.json", shared_dir / "action_encoding.json")
 
     mo.md(
         f"**Artifacts copied to `shared/` for multi-site exchange.**\n\n"
         f"Files:\n"
         + "\n".join(f"- `{dst.name}`" for dst in _files_to_copy.values())
-        + "\n- `action_remap.json`"
+        + "\n- `action_encoding.json`"
     )
     return
 
@@ -1430,7 +1432,7 @@ def _(
 
     # Standardization artifacts (for other sites to download)
     for _fname in ["best_model.pt", "preprocessor.json", "state_features.json",
-                    "training_config.json", "action_remap.json"]:
+                    "training_config.json", "action_encoding.json"]:
         _src = shared_dir / _fname
         if _src.exists():
             shutil.copy2(_src, _std_dir / _fname)
