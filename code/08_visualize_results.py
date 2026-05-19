@@ -63,13 +63,14 @@ def _():
         "grid.alpha": 0.2,
     })
 
-    # ── Action colors (PI encoding: 0=Increase, 1=Decrease, 2=Stop, 3=Stay) ──
-    ACTION_LABELS = {0: "Increase", 1: "Decrease", 2: "Stop", 3: "Stay"}
+    # ── Action colors (0=None…4=Very High — absolute NEE dose level) ──
+    ACTION_LABELS = {0: "None", 1: "Low", 2: "Medium", 3: "High", 4: "Very High"}
     ACTION_COLORS = {
-        0: "#E53935",   # red — escalation
-        1: "#42A5F5",   # blue — de-escalation
-        2: "#66BB6A",   # green — liberation
-        3: "#F8BBD0",   # light pink — maintenance
+        0: "#66BB6A",   # green — no vasopressor
+        1: "#FFF176",   # yellow — low dose
+        2: "#FFA726",   # orange — medium dose
+        3: "#E53935",   # red — high dose
+        4: "#B71C1C",   # dark red — very high dose
     }
 
     # CPC endpoint colors
@@ -123,7 +124,7 @@ def _(ext_val_dir, intermediate_dir, logger, mo, np, pd, training_dir):
     coef_summary = pd.read_csv(training_dir / "coef_summary.csv")
     bin_summary = pd.read_csv(training_dir / "bin_summary.csv")
 
-    with open(training_dir / "action_remap.json") as _f:
+    with open(training_dir / "action_encoding.json") as _f:
         import json as _json
         action_remap = _json.load(_f)
 

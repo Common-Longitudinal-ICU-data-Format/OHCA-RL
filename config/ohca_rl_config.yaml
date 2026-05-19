@@ -321,16 +321,16 @@ outlier_ranges:
 # ============================================================================
 action_inference:
   interval_minutes: 60
-  nee_change_tolerance: 0.03   # mcg/kg/min — minimum meaningful NEE delta
-  include_start_action: false  # start merged into increase → 4 actions
-  time_window_hours: 120       # first vital to +120h
-  med_ffill_trailing_hours: 4  # ffill non-zero meds up to 4h after last observation
+  encoding: absolute_dose_level   # action = NEE bin at t+1 (forward-looking MDP)
+  time_window_hours: 120          # first vital to +120h
+  med_ffill_trailing_hours: 4     # ffill non-zero meds up to 4h after last observation
 
-# Action encoding:
-#   0 = stay     (no meaningful NEE change)
-#   1 = increase (NEE goes up by >= tolerance, or new med started)
-#   2 = decrease (NEE goes down by >= tolerance, still > 0)
-#   3 = stop     (NEE drops to 0 from > 0)
+# Action encoding (fixed clinical cutoffs, mcg/kg/min NEE equivalent):
+#   0 = none      (NEE == 0)
+#   1 = low       (0    < NEE < 0.05)
+#   2 = medium    (0.05 ≤ NEE ≤ 0.15)
+#   3 = high      (0.15 < NEE ≤ 0.30)
+#   4 = very_high (NEE > 0.30)
 
 # ============================================================================
 # REWARD SIGNAL (Step 04)

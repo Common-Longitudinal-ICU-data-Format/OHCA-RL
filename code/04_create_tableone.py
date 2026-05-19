@@ -469,7 +469,7 @@ def _(bucketed_df, fmt_n_pct, logger, mo, np, pd):
     logger.info("Computing pre-training summaries...")
 
     # Action distribution
-    _action_labels = {0: "Stay", 1: "Increase", 2: "Decrease", 3: "Stop"}
+    _action_labels = {0: "None", 1: "Low", 2: "Medium", 3: "High", 4: "Very High"}
     _action_counts = bucketed_df["action"].value_counts().sort_index()
     _n_total = len(bucketed_df)
 
