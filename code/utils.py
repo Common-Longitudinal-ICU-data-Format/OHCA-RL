@@ -7,7 +7,9 @@ Dose conversion logic adapted from clifpy.utils.unit_converter for local iterati
 For table loading, outlier handling, and waterfall — use clifpy directly.
 """
 
+import io
 import logging
+import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -20,6 +22,77 @@ except ImportError:
     duckdb = None  # Only needed for dose conversion functions
 
 logger = logging.getLogger(__name__)
+
+
+class _StreamTee(io.TextIOBase):
+    """Write to multiple text streams at once (e.g., terminal + log file)."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, s):
+        for stream in self._streams:
+            try:
+                stream.write(s)
+                stream.flush()
+            except Exception:
+                pass
+        return len(s)
+    def flush(self):
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+    def isatty(self):
+        # Forward to the underlying terminal stream so libraries (matplotlib,
+        # tqdm) detect the TTY correctly when running interactively.
+        first = self._streams[0] if self._streams else None
+        return bool(getattr(first, "isatty", lambda: False)())
+    def fileno(self):
+        first = self._streams[0] if self._streams else None
+        if first is None or not hasattr(first, "fileno"):
+            raise OSError("no fileno on wrapped stream")
+        return first.fileno()
+
+
+def init_log_capture(script_path, project_root, mode_label: str = "") -> Path:
+    """Tee stdout/stderr to terminal AND a timestamped log file.
+
+    Writes to ``<project_root>/output/final/logs/<script>_<YYYYMMDD_HHMMSS>.log``.
+    Idempotent: safe to call multiple times in one process (only the first
+    call replaces stdout/stderr).
+
+    Parameters
+    ----------
+    script_path : str | Path
+        Pass ``__file__`` from the calling script.
+    project_root : str | Path
+        Project root path (used to anchor ``output/final/logs/``).
+    mode_label : str, optional
+        Optional suffix on the log filename (e.g., ``"_validate"``).
+
+    Returns
+    -------
+    Path
+        Absolute path to the log file being written.
+    """
+    if isinstance(sys.stdout, _StreamTee):
+        # Already wrapped; no-op (avoids duplicate handles on re-entry)
+        return Path(getattr(sys.stdout, "_log_file", ""))
+
+    log_dir = Path(project_root) / "output" / "final" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(script_path).stem
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = f"_{mode_label}" if mode_label else ""
+    log_file = log_dir / f"{stem}_{ts}{suffix}.log"
+
+    handle = open(log_file, "a", buffering=1)  # line-buffered
+    tee = _StreamTee(sys.__stdout__, handle)
+    tee._log_file = str(log_file)
+    sys.stdout = tee
+    sys.stderr = _StreamTee(sys.__stderr__, handle)
+    print(f"[log] Capturing to {log_file}")
+    return log_file
 
 
 def setup_logging(name: str, log_dir: str | Path | None = None) -> logging.Logger:

@@ -26,6 +26,7 @@ labs_of_interest:
   - lactate
   # Hematology
   - hemoglobin
+  - troponin_t
 
 labs_required_columns:
   - hospitalization_id
