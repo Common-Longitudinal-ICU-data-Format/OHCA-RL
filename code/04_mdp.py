@@ -629,7 +629,14 @@ first_vaso_with_hour = first_vaso.merge(
 first_vaso_with_hour["first_vaso_hour"] = (
     (first_vaso_with_hour["first_vaso_dttm"] -
      first_vaso_with_hour["anchor_dttm"]).dt.total_seconds() / 3600.0
-).astype(int)
+)
+# Drop patients whose anchor or first_vaso is missing (already excluded from bucketed cohort)
+_n_before = len(first_vaso_with_hour)
+first_vaso_with_hour = first_vaso_with_hour.dropna(subset=["first_vaso_hour"])
+_n_dropped = _n_before - len(first_vaso_with_hour)
+if _n_dropped:
+    print(f"Dropped {_n_dropped} first_vaso rows with NaN anchor/first_vaso_dttm")
+first_vaso_with_hour["first_vaso_hour"] = first_vaso_with_hour["first_vaso_hour"].astype(int)
 
 bucketed = bucketed.merge(
     first_vaso_with_hour[["hospitalization_id", "first_vaso_hour"]],
@@ -1141,6 +1148,39 @@ print(f"  total decision points: {_rl_cohort['n_decision_points'].sum():,}")
 # Save the RL cohort identifier list for downstream notebooks
 _rl_cohort.to_parquet(OUT_DIR / "rl_cohort_reviewed.parquet", index=False)
 print(f"Saved RL cohort identifiers → {OUT_DIR / 'rl_cohort.parquet'}")
+
+# ── Append RL-cohort STROBE rows to output/final/strobe_counts.csv ──
+# Earlier rows (steps 1–4) are written by 01_cohort.py at the OHCA-ICU level.
+# This block adds the additional filtering the model actually applies.
+_strobe_path = FINAL_DIR / "strobe_counts.csv"
+if _strobe_path.exists():
+    _strobe = pd.read_csv(_strobe_path)
+    _site = _strobe["site"].iloc[0] if "site" in _strobe.columns and len(_strobe) else SITE_NAME
+
+    # Drop any prior RL-cohort rows so this is idempotent across re-runs
+    _strobe = _strobe[~_strobe["counter"].str.startswith("5_")]
+
+    _ohca_icu_n = int(_strobe.loc[_strobe["counter"] == "4_icu_admitted_patients", "value"].iloc[0])
+    _rl_n       = len(_rl_hosp_ids)
+    _excluded_n = _ohca_icu_n - _rl_n
+    _total_dp   = int(_rl_cohort["n_decision_points"].sum())
+    _median_dp  = int(_rl_cohort["n_decision_points"].median())
+
+    _new_rows = pd.DataFrame([
+        {"counter": "5_rl_cohort_patients",                  "value": _rl_n,       "site": _site},
+        {"counter": "5_excluded_no_decision_point",          "value": _excluded_n, "site": _site},
+        {"counter": "5_rl_cohort_decision_points_total",     "value": _total_dp,   "site": _site},
+        {"counter": "5_rl_cohort_decision_points_median",    "value": _median_dp,  "site": _site},
+    ])
+    _strobe = pd.concat([_strobe, _new_rows], ignore_index=True)
+    _strobe.to_csv(_strobe_path, index=False)
+    print(f"Appended RL-cohort STROBE rows → {_strobe_path}")
+    print(f"  OHCA-ICU                      : {_ohca_icu_n:,}")
+    print(f"  RL cohort (≥1 decision point) : {_rl_n:,}")
+    print(f"  Excluded (no decision point)  : {_excluded_n:,}")
+else:
+    print(f"⚠️  {_strobe_path} not found — skipping STROBE update. "
+          "Run 01_cohort.py first.")
 
 # ── Save full bucketed (all 1,456 patients, all hours within 120h window) ──
 # Useful for future analyses, sensitivity studies, alternative cohort definitions

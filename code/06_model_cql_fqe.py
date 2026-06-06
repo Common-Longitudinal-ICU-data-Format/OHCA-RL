@@ -182,36 +182,38 @@ for i, v in enumerate([aint.median(), aterm.median()]):
 plt.tight_layout()
 
 # %%
-_drop_id_meta = [
-    "hospitalization_id", "hour", "anchor_dttm", "anchor_source",
-    "exit_hour", "is_scaffold", "window_close_reason",
-    "cpc_tier", "cpc_tier_x", "cpc_tier_y", "survival_status",
-]
+# Leakage definitions — used only as a sanity assert below
 _LEAKY_MED_COLS = ['med_cont_norepinephrine', 'med_cont_epinephrine', 'med_cont_phenylephrine',
                    'med_cont_vasopressin', 'med_cont_dopamine', 'med_cont_angiotensin']
 _LEAKY_DIR_COLS = ['nee_changes_in_hour', 'nee_dir_none', 'nee_dir_esc', 'nee_dir_desc', 'nee_dir_mixed']
 _LEAKY_OTHER    = ['hours_since_last_on_pressor']
-_drop_action = (["action_tier", "action_label", "med_cont_nee"]
-                + _LEAKY_MED_COLS + _LEAKY_DIR_COLS + _LEAKY_OTHER)
-_drop_mask   = ["mask_off", "mask_low", "mask_med", "mask_high", "mask_vhigh"]
-_drop_reward = ["r_intermediate", "r_terminal", "reward", "return",
-                "raw_intermediate", "raw_intermediate_unit"]
-_drop_categorical = [c for c in df.columns
-                     if c.startswith(("resp_device_", "resp_mode_", "resp_vent_brand_",
-                                      "resp_tracheostomy", "adt_"))]
-_drop_extra = ["in_decision_window", "first_vaso_hour"]
 
-drop_cols = set(_drop_id_meta + _drop_action + _drop_mask + _drop_reward +
-                _drop_categorical + _drop_extra)
-state_cols = [c for c in df.columns if c not in drop_cols]
+# ── Read curated state feature schema (source of truth for BOTH train and validate) ──
+# The schema is the intersection of features available across federated sites.
+# Pre-aha-run pipeline auto-picked from df.columns, which created site-dependent state_dim
+# (UCMC=70, Rush=64); now both train and validate use the same fixed list so the model
+# trained at the coordinating center can be applied at any site without dim mismatch.
+_state_schema_path = CONFIG_DIR / "state_features.json"
+with open(_state_schema_path) as f:
+    _feat_cfg = json.load(f)
+state_cols = list(_feat_cfg["state_features"])
+print(f"\nLoaded state schema from {_state_schema_path.name}: {len(state_cols)} features")
 
-_non_numeric = [c for c in state_cols if not pd.api.types.is_numeric_dtype(df[c])]
-if _non_numeric:
-    print(f"⚠️  Non-numeric state cols (will be dropped): {_non_numeric}")
-    state_cols = [c for c in state_cols if c not in _non_numeric]
+# Ensure every listed feature exists in df (sites lacking the data source get zero-filled).
+# In well-behaved cases this list is empty — the upstream pipeline should produce all columns.
+_missing = [c for c in state_cols if c not in df.columns]
+if _missing:
+    print(f"\n⚠️  Local data lacks {len(_missing)} curated feature(s) — filling with 0:")
+    for c in _missing:
+        df[c] = 0.0
+        print(f"  - {c}")
 
+# Sanity asserts (catch config mistakes early)
 _still_leaky = [c for c in state_cols if c in (_LEAKY_MED_COLS + _LEAKY_DIR_COLS + _LEAKY_OTHER)]
-assert not _still_leaky, f"LEAKY cols still in state: {_still_leaky}"
+assert not _still_leaky, f"LEAKY cols in curated state schema: {_still_leaky}"
+_non_numeric = [c for c in state_cols if not pd.api.types.is_numeric_dtype(df[c])]
+assert not _non_numeric, f"Non-numeric cols in curated state schema: {_non_numeric}"
+
 print(f"\nState features ({len(state_cols)} total):")
 for i, c in enumerate(state_cols):
     _tag = " (lagged)" if c.endswith("_prev") or c == "prev_action_tier" else ""
@@ -291,12 +293,24 @@ _val_state_df   = pd.DataFrame(val_data["state"],   columns=state_cols)
 _train_next_df  = pd.DataFrame(train_data["next_state"], columns=state_cols)
 _val_next_df    = pd.DataFrame(val_data["next_state"],   columns=state_cols)
 
-feature_medians = _train_state_df.median(axis=0).fillna(0)
+if MODE == "validate":
+    # External validation: use TRAINING site's normalization (mean / std / median for NaN fill).
+    # This ensures the model sees inputs on the same scale it was trained on.
+    _shared_norm = SHARED_DIR / "normalization_stats.parquet"
+    assert _shared_norm.exists(), f"Shared normalization stats missing: {_shared_norm}"
+    _ns = pd.read_parquet(_shared_norm).set_index("feature")
+    feature_medians = _ns["median"].reindex(state_cols).fillna(0)
+    feature_mean    = _ns["mean"].reindex(state_cols).fillna(0)
+    feature_std     = _ns["std"].reindex(state_cols).fillna(1.0).replace(0, 1.0)
+    print(f"[validate] Loaded normalization from {_shared_norm.name} (training-site mean/std)")
+else:
+    # Training: compute mean / std / median from this site's own training data
+    feature_medians = _train_state_df.median(axis=0).fillna(0)
+    feature_mean    = _train_state_df.mean(axis=0)
+    feature_std     = _train_state_df.std(axis=0).replace(0, 1.0)
+
 for _d in (_train_state_df, _val_state_df, _train_next_df, _val_next_df):
     _d.fillna(feature_medians, inplace=True)
-
-feature_mean = _train_state_df.mean(axis=0)
-feature_std  = _train_state_df.std(axis=0).replace(0, 1.0)
 
 def normalize(df_state):
     return ((df_state - feature_mean) / feature_std).values.astype(np.float32)

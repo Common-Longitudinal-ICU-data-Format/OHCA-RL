@@ -125,5 +125,53 @@ print(f"Saved → {out_strat}")
 print(f"Saved → {out_html}")
 
 # %%
-print("\n=== Table 1 (stratified by survival_status) ===")
+# ─────────────────────────────────────────────────────────────────────
+# Table 1 on the RL cohort — the patients actually fed to the model.
+# This is the cohort the abstract should report demographics for.
+# Drops patients with no decision point (no vasopressor in [0, 120h) window).
+# ─────────────────────────────────────────────────────────────────────
+_rl_path = OUT_DIR / "rl_cohort_reviewed.parquet"
+if _rl_path.exists():
+    rl_cohort = pd.read_parquet(_rl_path)
+    rl_ids = set(rl_cohort["hospitalization_id"].astype(str))
+    df_rl = df[df["hospitalization_id"].astype(str).isin(rl_ids)].copy()
+
+    print(f"\nRL cohort n = {len(df_rl)} "
+          f"(of {len(df)} OHCA-ICU; "
+          f"dropped {len(df) - len(df_rl)} with no decision point)")
+    print(f"Survived: {df_rl['survived'].sum()} ({100*df_rl['survived'].mean():.1f}%)")
+
+    table1_rl_overall = TableOne(
+        df_rl, columns=columns, categorical=categorical,
+        nonnormal=nonnormal, labels=labels,
+        pval=False, missing=True,
+    )
+    table1_rl_strat = TableOne(
+        df_rl, columns=columns, categorical=categorical,
+        nonnormal=nonnormal, labels=labels,
+        groupby="survival_status",
+        pval=True, missing=True,
+    )
+
+    out_rl_overall = FINAL_DIR / "tableone_rl_cohort_overall.csv"
+    out_rl_strat   = FINAL_DIR / "tableone_rl_cohort_by_survival.csv"
+    out_rl_html    = FINAL_DIR / "tableone_rl_cohort_by_survival.html"
+    table1_rl_overall.to_csv(out_rl_overall)
+    table1_rl_strat.to_csv(out_rl_strat)
+    with open(out_rl_html, "w") as f:
+        f.write(table1_rl_strat.tabulate(tablefmt="html"))
+
+    print(f"Saved → {out_rl_overall}")
+    print(f"Saved → {out_rl_strat}")
+    print(f"Saved → {out_rl_html}")
+else:
+    print(f"\n⚠️  {_rl_path} not found — skipping RL-cohort Table 1. "
+          "Run 04_mdp.py first.")
+
+# %%
+print("\n=== Table 1: OHCA-ICU cohort (stratified by survival_status) ===")
 print(table1_strat.tabulate(tablefmt="grid"))
+
+if _rl_path.exists():
+    print("\n=== Table 1: RL cohort (stratified by survival_status) ===")
+    print(table1_rl_strat.tabulate(tablefmt="grid"))

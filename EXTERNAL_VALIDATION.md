@@ -17,7 +17,7 @@ If `shared/` is empty, contact the coordinating center.
 
 ## What you need on your end
 
-1. A CLIF-formatted CLIF Spec 2.x database for your site, accessible via
+1. A CLIF-formatted CLIF Spec 2.1 database for your site, accessible via
    the [`clifpy`](https://github.com/Common-Longitudinal-ICU-data-Format/clifpy)
    reader (DuckDB or pandas backend).
 2. Python 3.11+ with the packages in `requirements.txt` (or your existing
