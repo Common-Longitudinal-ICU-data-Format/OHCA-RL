@@ -187,14 +187,48 @@ _check = (patient_static.groupby(["discharge_category", "cpc_tier"], dropna=Fals
           .size().reset_index(name="n").sort_values("n", ascending=False))
 print(_check.to_string(index=False))
 
-# ── Flag any unmapped discharge strings ──
+# ── Exclude patients with unmapped discharge_category ──
+# A NaN cpc_tier means we can't compute the terminal reward; one such patient is
+# enough to poison FQE training to NaN downstream. We drop them here at the source
+# (rather than guarding every downstream consumer) and emit a STROBE row so the
+# exclusion is auditable.
 _unmapped = patient_static[patient_static["cpc_tier"].isna()]
 if len(_unmapped):
-    print(f"\n⚠️  {len(_unmapped)} patients have UNMAPPED discharge_category:")
+    print(f"\n⚠️  {len(_unmapped)} patient(s) have UNMAPPED discharge_category — dropping:")
     print(_unmapped["discharge_category"].value_counts().to_string())
-    print("These will be excluded from reward calculation. Update DISPOSITION_MAPPING if needed.")
+    print("(Add the discharge categories to DISPOSITION_MAPPING above if they should be kept.)")
 
-# Save the per-patient CPC tier for downstream use
+    _unmapped_ids = set(_unmapped["hospitalization_id"].astype(str))
+    _n_dp_before = bucketed_dp["hospitalization_id"].astype(str).nunique()
+    _n_full_before = bucketed_full["hospitalization_id"].astype(str).nunique()
+
+    patient_static = patient_static[patient_static["cpc_tier"].notna()].copy()
+    bucketed_dp    = bucketed_dp[~bucketed_dp["hospitalization_id"].astype(str).isin(_unmapped_ids)].copy()
+    bucketed_full  = bucketed_full[~bucketed_full["hospitalization_id"].astype(str).isin(_unmapped_ids)].copy()
+    rl_cohort      = rl_cohort[~rl_cohort["hospitalization_id"].astype(str).isin(_unmapped_ids)].copy()
+
+    _n_dp_after = bucketed_dp["hospitalization_id"].astype(str).nunique()
+    print(f"  RL cohort (decision-point rows): {_n_dp_before:,} → {_n_dp_after:,} patients")
+    print(f"  RL cohort (full bucketed rows) : {_n_full_before:,} → {bucketed_full['hospitalization_id'].astype(str).nunique():,} patients")
+
+# ── Append STROBE row reflecting the post-CPC-mapping cohort ──
+_strobe_path = FINAL_DIR / "strobe_counts.csv"
+if _strobe_path.exists():
+    _strobe = pd.read_csv(_strobe_path)
+    _site = _strobe["site"].iloc[0] if "site" in _strobe.columns and len(_strobe) else SITE_NAME
+    _strobe = _strobe[~_strobe["counter"].str.startswith("6_")]  # idempotent
+    _final_n = rl_cohort["hospitalization_id"].astype(str).nunique()
+    _rl_n_pre = int(_strobe.loc[_strobe["counter"] == "5_rl_cohort_patients", "value"].iloc[0]) \
+                if (_strobe["counter"] == "5_rl_cohort_patients").any() else _final_n
+    _new_rows = pd.DataFrame([
+        {"counter": "6_modeling_cohort_patients",   "value": _final_n,             "site": _site},
+        {"counter": "6_excluded_unmapped_cpc",      "value": _rl_n_pre - _final_n, "site": _site},
+    ])
+    _strobe = pd.concat([_strobe, _new_rows], ignore_index=True)
+    _strobe.to_csv(_strobe_path, index=False)
+    print(f"Appended modeling-cohort STROBE rows → {_strobe_path}")
+
+# Save the per-patient CPC tier for downstream use (no NaNs now)
 patient_static[["hospitalization_id", "discharge_category", "cpc_tier"]].to_parquet(
     OUT_DIR / "patient_disposition_reviewed.parquet", index=False
 )
